@@ -1,0 +1,39 @@
+name: Flat Hunter - Hyderabad Rental Scanner
+
+on:
+  schedule:
+    # Runs every 6 hours (UTC: 00:00, 06:00, 12:00, 18:00)
+    # In IST: 5:30 AM, 11:30 AM, 5:30 PM, 11:30 PM
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # allows manual trigger from GitHub UI
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run flat hunter
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python flat_hunter.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "Flat Hunter Bot"
+          git config user.email "flat-hunter@bot.local"
+          git add state.json
+          git diff --staged --quiet || git commit -m "Update flat hunt state — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
