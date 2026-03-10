@@ -705,9 +705,18 @@ def _extract_card_data(link_tag, bhk, area_name):
 
     # ── Extract images from card ──
     for img in card.find_all("img"):
-        src = img.get("src", "") or img.get("data-src", "")
-        if src and src.startswith("http") and "logo" not in src.lower() and "icon" not in src.lower():
-            data["images"].append(src)
+        src = img.get("src", "") or img.get("data-src", "") or img.get("data-original", "")
+        if not src or not src.startswith("http"):
+            continue
+        # Only include actual property images from NoBroker's CDN
+        if any(domain in src for domain in ["assets.nobroker.in", "nobroker.in/nb-new",
+                                             "images.nobroker.in", "cdn.nobroker.in"]):
+            if any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                data["images"].append(src)
+        # Also accept other CDN image URLs
+        elif re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
+            if "logo" not in src.lower() and "icon" not in src.lower() and "avatar" not in src.lower():
+                data["images"].append(src)
 
     # ── Extract project name ──
     # NoBroker card format: "3 BHK Apartment In <Project Name> for Rent"
