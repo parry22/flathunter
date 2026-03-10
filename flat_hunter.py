@@ -522,6 +522,7 @@ def _nobroker_html(area_name, bhk):
                     card_text = parent.get_text(" ", strip=True)[:300]
                     print(f"  [NoBroker HTML] Card context: {card_text}")
 
+            debug_first_card = True
             for link in links:
                 href = link.get("href", "")
                 pid_match = re.search(r"/([a-f0-9]{20,})/detail", href)
@@ -538,13 +539,28 @@ def _nobroker_html(area_name, bhk):
                 # Try to extract data from the link's card context
                 card_data = _extract_card_data(link, bhk, area_name)
 
+                # Debug: print first card's extracted data
+                if debug_first_card:
+                    print(f"  [NoBroker HTML] First card parsed: rent={card_data.get('rent')}, "
+                          f"sqft={card_data.get('sqft')}, floor={card_data.get('floor')}, "
+                          f"bachelor={card_data.get('bachelor_verified')}, "
+                          f"project={card_data.get('project', '?')[:40]}, "
+                          f"family_only={card_data.get('family_only', False)}")
+                    debug_first_card = False
+
+                # Skip family-only listings
+                if card_data.get("family_only"):
+                    continue
+
+                # If we got rent from the card, we have enough data
+                has_data = card_data.get("rent", 0) > 0
                 listings.append({
                     "id": lid,
                     "url": full_url,
                     "source": "NoBroker",
                     "bhk": bhk,
                     "locality": area_name.title(),
-                    "needs_verification": card_data.get("rent", 0) == 0,
+                    "needs_verification": not has_data,
                     **card_data,
                 })
 
@@ -612,55 +628,105 @@ def _extract_card_data(link_tag, bhk, area_name):
             break
 
     card_text = card.get_text(" ", strip=True)
-    card_html = str(card)
 
-    # Extract rent (look for ₹ or numeric values near "rent")
-    rent_match = re.search(r'₹\s*([\d,]+)', card_text)
-    if not rent_match:
-        rent_match = re.search(r'([\d,]+)\s*/\s*month', card_text, re.I)
-    if not rent_match:
-        rent_match = re.search(r'(?:rent|price)\s*:?\s*₹?\s*([\d,]+)', card_text, re.I)
-    if rent_match:
-        data["rent"] = int(rent_match.group(1).replace(",", ""))
+    # ── Extract rent ──
+    # NoBroker format: "₹ 60,000 No Extra Maintenance Rent" or "₹ 30,000 + ₹ 2,000 Maintenance Rent"
+    # The ₹ might appear as \u20b9 or â¹ depending on encoding
+    rent = 0
 
-    # Extract sqft
+    # Try multiple patterns for rent
+    for pattern in [
+        r'[\u20b9]\s*([\d,]+)',                          # ₹ 60,000
+        r'(\d[\d,]+)\s*(?:\+[^R]*)?\s*(?:No Extra\s+)?(?:Maintenance\s+)?Rent',  # 60,000 ... Rent
+        r'(\d[\d,]+)\s*(?:No Extra\s+)?Rent',            # 60,000 Rent
+        r'(\d[\d,]+)\s*/\s*month',                       # 60,000/month
+    ]:
+        m = re.search(pattern, card_text, re.I)
+        if m:
+            rent = int(m.group(1).replace(",", ""))
+            break
+
+    # If still no rent, try: first big number (5 digits+) before "Rent" or "Deposit"
+    if rent == 0:
+        # Find all numbers >= 10000
+        numbers = re.findall(r'(\d[\d,]+)', card_text)
+        for num_str in numbers:
+            num = int(num_str.replace(",", ""))
+            if 5000 <= num <= 100000:
+                rent = num
+                break
+
+    data["rent"] = rent
+
+    # ── Extract deposit ──
+    dep_match = re.search(r'([\d,]+)\s*Deposit', card_text, re.I)
+    if dep_match:
+        data["deposit"] = int(dep_match.group(1).replace(",", ""))
+
+    # ── Extract sqft ──
     sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', card_text, re.I)
+    if not sqft_match:
+        sqft_match = re.search(r'([\d,]+)\s*(?:Builtup|Built[\s-]*up|Carpet|Super)', card_text, re.I)
     if sqft_match:
         data["sqft"] = int(sqft_match.group(1).replace(",", ""))
 
-    # Extract floor
-    floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)?\s*(?:floor|of\s*\d+)', card_text, re.I)
+    # ── Extract floor ──
+    # NoBroker format: "1/8" (floor 1 of 8), or "5/16" (floor 5 of 16)
+    floor_match = re.search(r'(\d+)\s*/\s*(\d+)', card_text)
     if floor_match:
         data["floor"] = int(floor_match.group(1))
+        # Also check: if it appears after sqft, it's floor/total (not part of rent)
+    if not floor_match or data["floor"] == 0:
+        floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
+        if floor_match:
+            data["floor"] = int(floor_match.group(1))
 
-    # Check bachelor
-    if re.search(r'bachelor|anyone|all\s*tenant', card_text, re.I):
+    # ── Check tenant preference ──
+    # NoBroker shows: "All Preferred Tenants", "Family Preferred Tenants", "Bachelor Preferred Tenants"
+    tenant_text = card_text.lower()
+    if re.search(r'all\s+preferred\s+tenants|bachelor\s+preferred|anyone', tenant_text):
         data["bachelor_verified"] = True
+    elif re.search(r'family\s+preferred\s+tenants|family\s+only', tenant_text):
+        data["bachelor_verified"] = False
+        # Mark as family-only for filtering
+        data["family_only"] = True
 
-    # Check furnishing
-    if "fully furnished" in card_text.lower():
+    # ── Check furnishing ──
+    if "fully furnished" in tenant_text or "fully-furnished" in tenant_text:
         data["furnishing"] = "Fully Furnished"
-    elif "semi" in card_text.lower() and "furnished" in card_text.lower():
+    elif "semi furnished" in tenant_text or "semi-furnished" in tenant_text:
         data["furnishing"] = "Semi-Furnished"
-    elif "unfurnished" in card_text.lower():
+    elif "unfurnished" in tenant_text:
         data["furnishing"] = "Unfurnished"
 
-    # Extract images from card
+    # ── Check gated/posh society ──
+    if "posh society" in tenant_text or "gated" in tenant_text:
+        data["gated"] = True
+
+    # ── Extract images from card ──
     for img in card.find_all("img"):
         src = img.get("src", "") or img.get("data-src", "")
-        if src and src.startswith("http") and "logo" not in src.lower():
+        if src and src.startswith("http") and "logo" not in src.lower() and "icon" not in src.lower():
             data["images"].append(src)
 
-    # Extract project name from URL pattern or card text
-    href = link_tag.get("href", "")
-    name_match = re.search(r'in-([a-z-]+(?:-[a-z]+)*)-hyderabad', href)
-    if name_match:
-        raw = name_match.group(1).replace("-", " ").title()
-        # Clean up "Kondapur" etc from project name
-        for area in AREAS:
-            raw = raw.replace(area.title(), "").strip()
-        if raw and len(raw) > 3:
-            data["project"] = raw
+    # ── Extract project name ──
+    # NoBroker card format: "3 BHK Apartment In <Project Name> for Rent"
+    proj_match = re.search(
+        r'(?:\d\s*BHK\s*(?:Apartment|Flat|Villa|House)\s*In\s+)(.+?)(?:\s+for\s+Rent)',
+        card_text, re.I
+    )
+    if proj_match:
+        data["project"] = proj_match.group(1).strip()
+    else:
+        # Fallback: extract from URL
+        href = link_tag.get("href", "")
+        name_match = re.search(r'in-([a-z][\w-]+)-hyderabad', href)
+        if name_match:
+            raw = name_match.group(1).replace("-", " ").title()
+            for area in AREAS:
+                raw = raw.replace(area.title(), "").strip()
+            if raw and len(raw) > 3:
+                data["project"] = raw
 
     return data
 
