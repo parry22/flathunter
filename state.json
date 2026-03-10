@@ -79,6 +79,86 @@
       "source": "NoBroker",
       "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-30000/8a9fb2827a86377a017a86bb22094574/detail",
       "sent_at": "10 Mar 2026 11:53 AM IST"
+    },
+    {
+      "id": "nb_8aa9b7679cccafd0019c",
+      "project": "Lake View Sharvika",
+      "rent": 36000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-lake-view-shravika-hyderabad-for-rs-36000/8aa9b7679cccafd0019ccdd2e39b11a2/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9fe6838b084e79018b",
+      "project": "Standalone Building",
+      "rent": 26000,
+      "bhk": "2bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-26000/8a9fe6838b084e79018b094294cf6009/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9f80f6728459c70172",
+      "project": "Unknown",
+      "rent": 25000,
+      "bhk": "2bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-25000/8a9f80f6728459c701729270f1b04d1d/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9faa8997f250280197",
+      "project": "Golden Crest",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-gachibowli-hyderabad-for-rs-45000/8a9faa8997f250280197f29e6b5211c9/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9fbc827fb4f28c017f",
+      "project": "Unknown",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-gachibowli-hyderabad-for-rs-45000/8a9fbc827fb4f28c017fb518a6c10f5e/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9f84038c8ced79018c",
+      "project": "Unknown",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-rajeshwari-nilayam---494-%26-40%3bgachibowli%26-41%3b-hyderabad-for-rs-45000/8a9f84038c8ced79018c8e5af40353eb/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9fe182860936c30186",
+      "project": "Unknown",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-gachibowli-hyderabad-for-rs-45000/8a9fe182860936c30186095e8ec70554/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
+    },
+    {
+      "id": "nb_8a9fa0838bce2f55018b",
+      "project": "Rajeshwari Nilayam   494",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-rajeshwari-nilayam---494--hyderabad-for-rs-45000/8a9fa0838bce2f55018bcf0ac498735a/detail",
+      "sent_at": "10 Mar 2026 12:15 PM IST"
     }
   ],
   "rejected": [
@@ -151,5 +231,5 @@
       "reason": "budget"
     }
   ],
-  "last_run": "2026-03-10T11:54:25.669663+05:30"
+  "last_run": "2026-03-10T12:16:45.323133+05:30"
 }
