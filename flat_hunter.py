@@ -219,6 +219,55 @@ def extract_images_from_photos(photos, max_count=5):
     return images
 
 
+# ─── Debug helpers ────────────────────────────────────────────────────────────
+
+def _find_property_list(data, depth=0):
+    """Recursively search a dict/list for arrays of property-like dicts."""
+    if depth > 5:
+        return None
+    if isinstance(data, list) and len(data) > 0:
+        # Check if items look like property listings
+        if isinstance(data[0], dict) and any(
+            k in data[0] for k in ["propertyId", "id", "rent", "price", "type"]
+        ):
+            return data
+    if isinstance(data, dict):
+        # Check known keys first
+        for key in ["cardData", "data", "results", "properties", "listings",
+                     "searchResults", "propertyList", "list"]:
+            if key in data:
+                result = _find_property_list(data[key], depth + 1)
+                if result:
+                    return result
+        # Then check all keys
+        for key, val in data.items():
+            if isinstance(val, (dict, list)):
+                result = _find_property_list(val, depth + 1)
+                if result:
+                    return result
+    return None
+
+
+def _debug_dict_structure(data, prefix="", depth=0):
+    """Print dict/list structure for debugging (shallow)."""
+    if depth > 3:
+        return
+    if isinstance(data, dict):
+        for k, v in list(data.items())[:10]:
+            if isinstance(v, list):
+                item_type = type(v[0]).__name__ if v else "empty"
+                print(f"  [DEBUG] {prefix}.{k}: list[{len(v)}] of {item_type}")
+                if v and isinstance(v[0], dict):
+                    print(f"  [DEBUG]   first item keys: {list(v[0].keys())[:8]}")
+            elif isinstance(v, dict):
+                print(f"  [DEBUG] {prefix}.{k}: dict keys={list(v.keys())[:6]}")
+                _debug_dict_structure(v, f"{prefix}.{k}", depth + 1)
+            elif isinstance(v, str) and len(v) > 100:
+                print(f"  [DEBUG] {prefix}.{k}: str[{len(v)}]")
+            else:
+                print(f"  [DEBUG] {prefix}.{k}: {type(v).__name__} = {str(v)[:80]}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # NoBroker — Primary source (API + HTML fallback)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -256,56 +305,111 @@ def _nobroker_api(area_name, bhk):
     ]
     search_param = base64.b64encode(json.dumps(search_data).encode()).decode()
 
-    api_url = "https://www.nobroker.in/api/v1/property/filter/region/rent/hyderabad"
-    params = {
-        "pageNo": 1,
-        "searchParam": search_param,
-        "type": bhk_api,
-        "budget": f"0,{max_rent}",
-        "sharedAccomodation": 0,
-    }
+    # Try multiple API endpoints
+    api_endpoints = [
+        {
+            "url": "https://www.nobroker.in/api/v1/property/filter/region/rent/hyderabad",
+            "params": {
+                "pageNo": 1,
+                "searchParam": search_param,
+                "type": bhk_api,
+                "budget": f"0,{max_rent}",
+                "sharedAccomodation": 0,
+                "radius": 2.0,
+            },
+        },
+        {
+            "url": f"https://www.nobroker.in/api/v3/multi/property/RENT/filter",
+            "params": {
+                "city": "hyderabad",
+                "locality": area_name,
+                "type": bhk_api,
+                "budget": f",{max_rent}",
+                "pageNo": 1,
+                "sharedAccomodation": 0,
+            },
+        },
+    ]
 
     print(f"  [NoBroker API] Fetching {bhk} in {area_name}...")
 
+    # First, visit the main page to get cookies
     try:
-        resp = session.get(api_url, params=params, timeout=20, headers={
-            **HEADERS,
-            "Accept": "application/json, text/plain, */*",
-            "Referer": f"https://www.nobroker.in/{bhk}-flats-for-rent-in-{area_name}_hyderabad",
-        })
+        session.get("https://www.nobroker.in/", timeout=10)
+    except Exception:
+        pass
 
-        if resp.status_code != 200:
-            print(f"  [NoBroker API] HTTP {resp.status_code}")
-            return []
+    for endpoint in api_endpoints:
+        try:
+            resp = session.get(
+                endpoint["url"],
+                params=endpoint["params"],
+                timeout=20,
+                headers={
+                    **HEADERS,
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": f"https://www.nobroker.in/{bhk}-flats-for-rent-in-{area_name}_hyderabad",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
 
-        data = resp.json()
+            ct = resp.headers.get("Content-Type", "")
+            print(f"  [NoBroker API] {endpoint['url'].split('/')[-1]} → HTTP {resp.status_code}, CT: {ct[:40]}")
+            print(f"  [NoBroker API] Body preview: {resp.text[:200]}")
 
-        # Navigate to property list in response
-        properties = []
-        if isinstance(data, dict):
-            # Try multiple known response shapes
-            for key in ["data", "cardData", "results", "properties"]:
-                if key in data and isinstance(data[key], list):
-                    properties = data[key]
-                    break
-            if not properties:
-                other = data.get("otherParams", {})
-                if isinstance(other, dict):
-                    properties = other.get("cardData", [])
-        elif isinstance(data, list):
-            properties = data
+            if resp.status_code != 200:
+                continue
 
-        for prop in properties:
-            listing = _parse_nobroker_property(prop, area_name, bhk)
-            if listing:
-                listings.append(listing)
+            if "json" not in ct and "javascript" not in ct:
+                # Might be HTML (bot block page)
+                continue
 
-        print(f"  [NoBroker API] Got {len(listings)} listings in {area_name}")
+            data = resp.json()
 
-    except requests.exceptions.JSONDecodeError:
-        print(f"  [NoBroker API] Non-JSON response")
-    except Exception as e:
-        print(f"  [NoBroker API] Error: {e}")
+            # Debug: print response structure
+            if isinstance(data, dict):
+                print(f"  [NoBroker API] Response keys: {list(data.keys())[:10]}")
+                for k, v in data.items():
+                    if isinstance(v, list):
+                        print(f"  [NoBroker API]   {k}: list[{len(v)}]" +
+                              (f" first keys: {list(v[0].keys())[:6]}" if v and isinstance(v[0], dict) else ""))
+                    elif isinstance(v, dict):
+                        print(f"  [NoBroker API]   {k}: dict keys={list(v.keys())[:6]}")
+
+            # Navigate to property list
+            properties = []
+            if isinstance(data, dict):
+                for key in ["data", "cardData", "results", "properties", "otherParams"]:
+                    val = data.get(key)
+                    if isinstance(val, list) and val:
+                        properties = val
+                        break
+                    elif isinstance(val, dict):
+                        for sub_key in ["cardData", "data", "results"]:
+                            sub_val = val.get(sub_key)
+                            if isinstance(sub_val, list) and sub_val:
+                                properties = sub_val
+                                break
+                        if properties:
+                            break
+            elif isinstance(data, list):
+                properties = data
+
+            if properties:
+                print(f"  [NoBroker API] Found {len(properties)} properties to parse")
+                for prop in properties:
+                    listing = _parse_nobroker_property(prop, area_name, bhk)
+                    if listing:
+                        listings.append(listing)
+
+                if listings:
+                    print(f"  [NoBroker API] Got {len(listings)} qualified in {area_name}")
+                    return listings[:15]
+
+        except requests.exceptions.JSONDecodeError:
+            print(f"  [NoBroker API] Non-JSON response")
+        except Exception as e:
+            print(f"  [NoBroker API] Error: {e}")
 
     return listings[:15]
 
@@ -322,7 +426,9 @@ def _nobroker_html(area_name, bhk):
             print(f"  [NoBroker HTML] HTTP {resp.status_code}")
             return listings
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html_text = resp.text
+        soup = BeautifulSoup(html_text, "html.parser")
+        print(f"  [NoBroker HTML] Page size: {len(html_text)} bytes")
 
         # ── Try __NEXT_DATA__ (Next.js server data) ──
         next_tag = soup.find("script", id="__NEXT_DATA__")
@@ -330,22 +436,10 @@ def _nobroker_html(area_name, bhk):
             try:
                 nd = json.loads(next_tag.string)
                 page_props = nd.get("props", {}).get("pageProps", {})
+                print(f"  [NoBroker HTML] __NEXT_DATA__ pageProps keys: {list(page_props.keys())[:15]}")
 
-                # Try several known data paths
-                cards = None
-                for path in [
-                    lambda: page_props.get("serverData", {}).get("cardData", []),
-                    lambda: page_props.get("listData", {}).get("cardData", []),
-                    lambda: page_props.get("cardData", []),
-                    lambda: page_props.get("data", []),
-                ]:
-                    try:
-                        result = path()
-                        if result and isinstance(result, list):
-                            cards = result
-                            break
-                    except (AttributeError, TypeError):
-                        continue
+                # Deep-search for any list of property-like dicts
+                cards = _find_property_list(page_props)
 
                 if cards:
                     for prop in cards:
@@ -356,10 +450,14 @@ def _nobroker_html(area_name, bhk):
                     if listings:
                         return listings[:15]
                 else:
-                    print(f"  [NoBroker HTML] __NEXT_DATA__ found but no cardData")
+                    print(f"  [NoBroker HTML] __NEXT_DATA__ found but no property arrays")
+                    # Dump structure for debugging
+                    _debug_dict_structure(page_props, "pageProps", depth=3)
 
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 print(f"  [NoBroker HTML] __NEXT_DATA__ parse error: {e}")
+        else:
+            print(f"  [NoBroker HTML] No __NEXT_DATA__ tag found")
 
         # ── Try embedded JSON in any script tag ──
         for script in soup.find_all("script"):
@@ -406,35 +504,49 @@ def _nobroker_html(area_name, bhk):
             except Exception:
                 pass
 
-        # ── Fallback: extract links with property IDs ──
+        # ── Fallback: extract links + parse card context ──
         if not listings:
             links = soup.find_all("a", href=re.compile(r"/property/.*?/detail"))
+
+            # Debug: print HTML context around first link
+            if links:
+                first_link = links[0]
+                parent = first_link.parent
+                if parent:
+                    # Go up to find the card container
+                    for _ in range(5):
+                        if parent.parent and parent.parent.name not in ["body", "html", "[document]"]:
+                            parent = parent.parent
+                        else:
+                            break
+                    card_text = parent.get_text(" ", strip=True)[:300]
+                    print(f"  [NoBroker HTML] Card context: {card_text}")
+
             for link in links:
                 href = link.get("href", "")
                 pid_match = re.search(r"/([a-f0-9]{20,})/detail", href)
-                if pid_match:
-                    pid = pid_match.group(1)
-                    lid = f"nb_{pid[:20]}"
-                    if not any(l["id"] == lid for l in listings):
-                        full_url = urljoin("https://www.nobroker.in", href)
-                        listings.append({
-                            "id": lid,
-                            "url": full_url,
-                            "source": "NoBroker",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "needs_verification": True,
-                            "project": "Unknown",
-                            "rent": 0,
-                            "sqft": 0,
-                            "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [],
-                            "deposit": 0,
-                            "gated": False,
-                            "active": True,
-                        })
+                if not pid_match:
+                    continue
+
+                pid = pid_match.group(1)
+                lid = f"nb_{pid[:20]}"
+                if any(l["id"] == lid for l in listings):
+                    continue
+
+                full_url = urljoin("https://www.nobroker.in", href)
+
+                # Try to extract data from the link's card context
+                card_data = _extract_card_data(link, bhk, area_name)
+
+                listings.append({
+                    "id": lid,
+                    "url": full_url,
+                    "source": "NoBroker",
+                    "bhk": bhk,
+                    "locality": area_name.title(),
+                    "needs_verification": card_data.get("rent", 0) == 0,
+                    **card_data,
+                })
 
             # Also extract from script tag propertyId patterns
             for script in soup.find_all("script"):
@@ -474,6 +586,83 @@ def _nobroker_html(area_name, bhk):
         traceback.print_exc()
 
     return listings[:15]
+
+
+def _extract_card_data(link_tag, bhk, area_name):
+    """Try to extract listing data from the HTML card surrounding a link."""
+    data = {
+        "project": "Unknown",
+        "rent": 0,
+        "sqft": 0,
+        "floor": 0,
+        "furnishing": "Unknown",
+        "bachelor_verified": False,
+        "images": [],
+        "deposit": 0,
+        "gated": False,
+        "active": True,
+    }
+
+    # Walk up to find card container (usually 3-5 levels up)
+    card = link_tag
+    for _ in range(6):
+        if card.parent and card.parent.name not in ["body", "html", "[document]"]:
+            card = card.parent
+        else:
+            break
+
+    card_text = card.get_text(" ", strip=True)
+    card_html = str(card)
+
+    # Extract rent (look for ₹ or numeric values near "rent")
+    rent_match = re.search(r'₹\s*([\d,]+)', card_text)
+    if not rent_match:
+        rent_match = re.search(r'([\d,]+)\s*/\s*month', card_text, re.I)
+    if not rent_match:
+        rent_match = re.search(r'(?:rent|price)\s*:?\s*₹?\s*([\d,]+)', card_text, re.I)
+    if rent_match:
+        data["rent"] = int(rent_match.group(1).replace(",", ""))
+
+    # Extract sqft
+    sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', card_text, re.I)
+    if sqft_match:
+        data["sqft"] = int(sqft_match.group(1).replace(",", ""))
+
+    # Extract floor
+    floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)?\s*(?:floor|of\s*\d+)', card_text, re.I)
+    if floor_match:
+        data["floor"] = int(floor_match.group(1))
+
+    # Check bachelor
+    if re.search(r'bachelor|anyone|all\s*tenant', card_text, re.I):
+        data["bachelor_verified"] = True
+
+    # Check furnishing
+    if "fully furnished" in card_text.lower():
+        data["furnishing"] = "Fully Furnished"
+    elif "semi" in card_text.lower() and "furnished" in card_text.lower():
+        data["furnishing"] = "Semi-Furnished"
+    elif "unfurnished" in card_text.lower():
+        data["furnishing"] = "Unfurnished"
+
+    # Extract images from card
+    for img in card.find_all("img"):
+        src = img.get("src", "") or img.get("data-src", "")
+        if src and src.startswith("http") and "logo" not in src.lower():
+            data["images"].append(src)
+
+    # Extract project name from URL pattern or card text
+    href = link_tag.get("href", "")
+    name_match = re.search(r'in-([a-z-]+(?:-[a-z]+)*)-hyderabad', href)
+    if name_match:
+        raw = name_match.group(1).replace("-", " ").title()
+        # Clean up "Kondapur" etc from project name
+        for area in AREAS:
+            raw = raw.replace(area.title(), "").strip()
+        if raw and len(raw) > 3:
+            data["project"] = raw
+
+    return data
 
 
 def _parse_nobroker_property(prop, area_name, bhk):
