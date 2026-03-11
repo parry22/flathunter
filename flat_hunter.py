@@ -35,6 +35,7 @@ AREAS = {
 
 BUDGET = {"2bhk": 40000, "3bhk": 65000}
 MIN_FLOOR = 3
+MIN_IMAGES = 3  # minimum images required to share a listing
 IST = timezone(timedelta(hours=5, minutes=30))
 
 HEADERS = {
@@ -44,6 +45,21 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+}
+
+BROWSER_HEADERS = {
+    **HEADERS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
 }
 
 REJECT_KEYWORDS = [
@@ -202,7 +218,6 @@ def extract_images_from_photos(photos, max_count=5):
         if isinstance(photo, str):
             url = photo
         elif isinstance(photo, dict):
-            # NoBroker photo structure: {imagesMap: {large: ["url"]}}
             img_map = photo.get("imagesMap", {})
             for size in ["large", "medium", "original", "thumbnail"]:
                 val = img_map.get(size)
@@ -219,27 +234,22 @@ def extract_images_from_photos(photos, max_count=5):
     return images
 
 
-# ─── Debug helpers ────────────────────────────────────────────────────────────
-
 def _find_property_list(data, depth=0):
     """Recursively search a dict/list for arrays of property-like dicts."""
     if depth > 5:
         return None
     if isinstance(data, list) and len(data) > 0:
-        # Check if items look like property listings
         if isinstance(data[0], dict) and any(
             k in data[0] for k in ["propertyId", "id", "rent", "price", "type"]
         ):
             return data
     if isinstance(data, dict):
-        # Check known keys first
         for key in ["cardData", "data", "results", "properties", "listings",
                      "searchResults", "propertyList", "list"]:
             if key in data:
                 result = _find_property_list(data[key], depth + 1)
                 if result:
                     return result
-        # Then check all keys
         for key, val in data.items():
             if isinstance(val, (dict, list)):
                 result = _find_property_list(val, depth + 1)
@@ -248,24 +258,120 @@ def _find_property_list(data, depth=0):
     return None
 
 
-def _debug_dict_structure(data, prefix="", depth=0):
-    """Print dict/list structure for debugging (shallow)."""
-    if depth > 3:
-        return
-    if isinstance(data, dict):
-        for k, v in list(data.items())[:10]:
-            if isinstance(v, list):
-                item_type = type(v[0]).__name__ if v else "empty"
-                print(f"  [DEBUG] {prefix}.{k}: list[{len(v)}] of {item_type}")
-                if v and isinstance(v[0], dict):
-                    print(f"  [DEBUG]   first item keys: {list(v[0].keys())[:8]}")
-            elif isinstance(v, dict):
-                print(f"  [DEBUG] {prefix}.{k}: dict keys={list(v.keys())[:6]}")
-                _debug_dict_structure(v, f"{prefix}.{k}", depth + 1)
-            elif isinstance(v, str) and len(v) > 100:
-                print(f"  [DEBUG] {prefix}.{k}: str[{len(v)}]")
+def _extract_all_images_from_html(soup_or_tag, source=""):
+    """Extract all real property images from an HTML element.
+    Handles lazy-loaded images (data-src, data-lazyimg, data-original, etc.)
+    and background-image CSS.
+    """
+    images = []
+    seen = set()
+
+    # Known CDN domains per platform
+    cdn_domains = {
+        "NoBroker": ["assets.nobroker.in", "images.nobroker.in", "cdn.nobroker.in", "nobroker.in/nb-new"],
+        "MagicBricks": ["img.staticmb.com", "mediacdn.99acres.com", "magicbricks.com"],
+        "99acres": ["mediacdn.99acres.com", "99acres.com"],
+        "Housing.com": ["housing.com", "hc-img.housing.com", "is1-2.housingcdn.com",
+                         "is1-3.housingcdn.com", "is2-2.housingcdn.com", "is2-3.housingcdn.com"],
+        "SquareYards": ["img.squareyards.com", "squareyards.com"],
+    }
+
+    allowed = cdn_domains.get(source, [])
+    skip_keywords = ["logo", "icon", "avatar", "placeholder", "noimage", "no-image",
+                      "default", "blank", "spinner", "loading", "map", "watermark",
+                      "verified", "badge", "tag", "star", "rating"]
+
+    for img in soup_or_tag.find_all("img"):
+        # Check all possible image source attributes
+        for attr in ["src", "data-src", "data-lazyimg", "data-lazy-src",
+                      "data-original", "data-lazy", "data-img", "data-image",
+                      "data-hi-res-src", "data-hi-res"]:
+            src = img.get(attr, "")
+            if not src or not src.startswith("http"):
+                continue
+            if src in seen:
+                continue
+            # Skip non-property images
+            if any(kw in src.lower() for kw in skip_keywords):
+                continue
+            # Must be an image file
+            if not re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
+                continue
+            # If we know CDN domains, prefer those; otherwise accept any
+            if allowed:
+                if any(d in src for d in allowed) or not allowed:
+                    seen.add(src)
+                    images.append(src)
             else:
-                print(f"  [DEBUG] {prefix}.{k}: {type(v).__name__} = {str(v)[:80]}")
+                seen.add(src)
+                images.append(src)
+
+    # Also check for background-image in style attributes
+    for tag in soup_or_tag.find_all(style=True):
+        style = tag.get("style", "")
+        bg_match = re.search(r'background-image\s*:\s*url\(["\']?(https?://[^"\')\s]+)', style)
+        if bg_match:
+            src = bg_match.group(1)
+            if src not in seen and not any(kw in src.lower() for kw in skip_keywords):
+                if re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
+                    seen.add(src)
+                    images.append(src)
+
+    return images
+
+
+def _enrich_images_from_url(listing, timeout=10):
+    """Fetch a listing URL and extract images. Returns updated image list."""
+    url = listing.get("url", "")
+    if not url or not url.startswith("http"):
+        return listing.get("images", [])
+
+    existing = list(listing.get("images", []))
+    source = listing.get("source", "")
+
+    try:
+        resp = session.get(url, timeout=timeout, headers=BROWSER_HEADERS)
+        if resp.status_code != 200:
+            return existing
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # 1. og:image meta tag
+        og_img = soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            img_url = og_img["content"]
+            if img_url.startswith("http") and img_url not in existing:
+                existing.insert(0, img_url)
+
+        # 2. All images from the page
+        page_images = _extract_all_images_from_html(soup, source)
+        for img in page_images:
+            if img not in existing:
+                existing.append(img)
+            if len(existing) >= 6:
+                break
+
+        # 3. For NoBroker: also check __NEXT_DATA__ for photo URLs
+        if source == "NoBroker":
+            next_tag = soup.find("script", id="__NEXT_DATA__")
+            if next_tag and next_tag.string:
+                try:
+                    nd = json.loads(next_tag.string)
+                    # Find image URLs in the JSON
+                    nd_str = json.dumps(nd)
+                    cdn_urls = re.findall(r'(https?://assets\.nobroker\.in/img/[^"\\]+)', nd_str)
+                    for u in cdn_urls:
+                        if u not in existing and re.search(r'\.(jpg|jpeg|png|webp)', u, re.I):
+                            existing.append(u)
+                        if len(existing) >= 6:
+                            break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    except Exception as e:
+        print(f"    [enrich] Error fetching {url[:60]}: {e}")
+
+    return existing[:6]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -273,18 +379,13 @@ def _debug_dict_structure(data, prefix="", depth=0):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_nobroker(area_name, bhk="3bhk"):
-    """
-    Try multiple approaches to get NoBroker listings:
-    1. Internal JSON API
-    2. __NEXT_DATA__ from search page
-    3. HTML link extraction (needs verification)
-    """
+    """Try multiple approaches to get NoBroker listings."""
     # Approach 1: API
     listings = _nobroker_api(area_name, bhk)
     if listings:
         return listings
 
-    # Approach 2: HTML with __NEXT_DATA__ parsing
+    # Approach 2: HTML with __NEXT_DATA__ parsing + card extraction
     listings = _nobroker_html(area_name, bhk)
     return listings
 
@@ -305,35 +406,25 @@ def _nobroker_api(area_name, bhk):
     ]
     search_param = base64.b64encode(json.dumps(search_data).encode()).decode()
 
-    # Try multiple API endpoints
     api_endpoints = [
         {
             "url": "https://www.nobroker.in/api/v1/property/filter/region/rent/hyderabad",
             "params": {
-                "pageNo": 1,
-                "searchParam": search_param,
-                "type": bhk_api,
-                "budget": f"0,{max_rent}",
-                "sharedAccomodation": 0,
-                "radius": 2.0,
+                "pageNo": 1, "searchParam": search_param,
+                "type": bhk_api, "budget": f"0,{max_rent}",
+                "sharedAccomodation": 0, "radius": 2.0,
             },
         },
         {
             "url": f"https://www.nobroker.in/api/v3/multi/property/RENT/filter",
             "params": {
-                "city": "hyderabad",
-                "locality": area_name,
-                "type": bhk_api,
-                "budget": f",{max_rent}",
-                "pageNo": 1,
-                "sharedAccomodation": 0,
+                "city": "hyderabad", "locality": area_name,
+                "type": bhk_api, "budget": f",{max_rent}",
+                "pageNo": 1, "sharedAccomodation": 0,
             },
         },
     ]
 
-    print(f"  [NoBroker API] Fetching {bhk} in {area_name}...")
-
-    # First, visit the main page to get cookies
     try:
         session.get("https://www.nobroker.in/", timeout=10)
     except Exception:
@@ -352,31 +443,14 @@ def _nobroker_api(area_name, bhk):
                     "X-Requested-With": "XMLHttpRequest",
                 },
             )
-
             ct = resp.headers.get("Content-Type", "")
             print(f"  [NoBroker API] {endpoint['url'].split('/')[-1]} → HTTP {resp.status_code}, CT: {ct[:40]}")
             print(f"  [NoBroker API] Body preview: {resp.text[:200]}")
 
-            if resp.status_code != 200:
-                continue
-
-            if "json" not in ct and "javascript" not in ct:
-                # Might be HTML (bot block page)
+            if resp.status_code != 200 or "json" not in ct:
                 continue
 
             data = resp.json()
-
-            # Debug: print response structure
-            if isinstance(data, dict):
-                print(f"  [NoBroker API] Response keys: {list(data.keys())[:10]}")
-                for k, v in data.items():
-                    if isinstance(v, list):
-                        print(f"  [NoBroker API]   {k}: list[{len(v)}]" +
-                              (f" first keys: {list(v[0].keys())[:6]}" if v and isinstance(v[0], dict) else ""))
-                    elif isinstance(v, dict):
-                        print(f"  [NoBroker API]   {k}: dict keys={list(v.keys())[:6]}")
-
-            # Navigate to property list
             properties = []
             if isinstance(data, dict):
                 for key in ["data", "cardData", "results", "properties", "otherParams"]:
@@ -396,18 +470,16 @@ def _nobroker_api(area_name, bhk):
                 properties = data
 
             if properties:
-                print(f"  [NoBroker API] Found {len(properties)} properties to parse")
                 for prop in properties:
                     listing = _parse_nobroker_property(prop, area_name, bhk)
                     if listing:
                         listings.append(listing)
-
                 if listings:
                     print(f"  [NoBroker API] Got {len(listings)} qualified in {area_name}")
                     return listings[:15]
 
         except requests.exceptions.JSONDecodeError:
-            print(f"  [NoBroker API] Non-JSON response")
+            pass
         except Exception as e:
             print(f"  [NoBroker API] Error: {e}")
 
@@ -415,185 +487,64 @@ def _nobroker_api(area_name, bhk):
 
 
 def _nobroker_html(area_name, bhk):
-    """Scrape NoBroker search page — try __NEXT_DATA__ first, then links."""
+    """Scrape NoBroker search page — try __NEXT_DATA__ first, then card extraction."""
     listings = []
     url = f"https://www.nobroker.in/{bhk}-flats-for-rent-in-{area_name}_hyderabad"
-    print(f"  [NoBroker HTML] Fetching {bhk} in {area_name}...")
 
     try:
         resp = session.get(url, timeout=20)
         if resp.status_code != 200:
-            print(f"  [NoBroker HTML] HTTP {resp.status_code}")
             return listings
 
         html_text = resp.text
         soup = BeautifulSoup(html_text, "html.parser")
-        print(f"  [NoBroker HTML] Page size: {len(html_text)} bytes")
 
-        # ── Try __NEXT_DATA__ (Next.js server data) ──
+        # ── Try __NEXT_DATA__ ──
         next_tag = soup.find("script", id="__NEXT_DATA__")
         if next_tag and next_tag.string:
             try:
                 nd = json.loads(next_tag.string)
                 page_props = nd.get("props", {}).get("pageProps", {})
-                print(f"  [NoBroker HTML] __NEXT_DATA__ pageProps keys: {list(page_props.keys())[:15]}")
-
-                # Deep-search for any list of property-like dicts
                 cards = _find_property_list(page_props)
-
                 if cards:
                     for prop in cards:
                         listing = _parse_nobroker_property(prop, area_name, bhk)
                         if listing:
                             listings.append(listing)
-                    print(f"  [NoBroker HTML] Parsed {len(listings)} from __NEXT_DATA__")
                     if listings:
+                        print(f"  [NoBroker HTML] Parsed {len(listings)} from __NEXT_DATA__")
                         return listings[:15]
-                else:
-                    print(f"  [NoBroker HTML] __NEXT_DATA__ found but no property arrays")
-                    # Dump structure for debugging
-                    _debug_dict_structure(page_props, "pageProps", depth=3)
-
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                print(f"  [NoBroker HTML] __NEXT_DATA__ parse error: {e}")
-        else:
-            print(f"  [NoBroker HTML] No __NEXT_DATA__ tag found")
-
-        # ── Try embedded JSON in any script tag ──
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            if '"propertyId"' not in text:
-                continue
-            # Try to extract property objects
-            try:
-                # Find array-like JSON containing property objects
-                matches = re.findall(
-                    r'\{[^{}]*"propertyId"\s*:\s*"([a-f0-9]{20,})"[^{}]*"rent"\s*:\s*(\d+)[^{}]*\}',
-                    text
-                )
-                for prop_id, rent_str in matches:
-                    rent = int(rent_str)
-                    max_rent = BUDGET.get(bhk, 65000)
-                    if rent > max_rent or rent < 5000:
-                        continue
-                    lid = f"nb_{prop_id[:20]}"
-                    if not any(l["id"] == lid for l in listings):
-                        detail_url = (
-                            f"https://www.nobroker.in/property/"
-                            f"{bhk[0]}-bhk-apartment-for-rent-in-{area_name}"
-                            f"-hyderabad-for-rs-{rent}/{prop_id}/detail"
-                        )
-                        listings.append({
-                            "id": lid,
-                            "url": detail_url,
-                            "rent": rent,
-                            "source": "NoBroker",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "project": "Unknown",
-                            "sqft": 0,
-                            "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [],
-                            "deposit": 0,
-                            "gated": False,
-                            "active": True,
-                            "needs_verification": True,
-                        })
-            except Exception:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
         # ── Fallback: extract links + parse card context ──
-        if not listings:
-            links = soup.find_all("a", href=re.compile(r"/property/.*?/detail"))
+        links = soup.find_all("a", href=re.compile(r"/property/.*?/detail"))
 
-            # Debug: print HTML context around first link
-            if links:
-                first_link = links[0]
-                parent = first_link.parent
-                if parent:
-                    # Go up to find the card container
-                    for _ in range(5):
-                        if parent.parent and parent.parent.name not in ["body", "html", "[document]"]:
-                            parent = parent.parent
-                        else:
-                            break
-                    card_text = parent.get_text(" ", strip=True)[:300]
-                    print(f"  [NoBroker HTML] Card context: {card_text}")
+        for link in links:
+            href = link.get("href", "")
+            pid_match = re.search(r"/([a-f0-9]{20,})/detail", href)
+            if not pid_match:
+                continue
 
-            debug_first_card = True
-            for link in links:
-                href = link.get("href", "")
-                pid_match = re.search(r"/([a-f0-9]{20,})/detail", href)
-                if not pid_match:
-                    continue
+            pid = pid_match.group(1)
+            lid = f"nb_{pid[:20]}"
+            if any(l["id"] == lid for l in listings):
+                continue
 
-                pid = pid_match.group(1)
-                lid = f"nb_{pid[:20]}"
-                if any(l["id"] == lid for l in listings):
-                    continue
+            full_url = urljoin("https://www.nobroker.in", href)
+            card_data = _extract_card_data(link, bhk, area_name, pid)
 
-                full_url = urljoin("https://www.nobroker.in", href)
+            # Skip family-only listings
+            if card_data.get("family_only"):
+                continue
 
-                # Try to extract data from the link's card context
-                card_data = _extract_card_data(link, bhk, area_name)
-
-                # Debug: print first card's extracted data
-                if debug_first_card:
-                    print(f"  [NoBroker HTML] First card parsed: rent={card_data.get('rent')}, "
-                          f"sqft={card_data.get('sqft')}, floor={card_data.get('floor')}, "
-                          f"bachelor={card_data.get('bachelor_verified')}, "
-                          f"project={card_data.get('project', '?')[:40]}, "
-                          f"family_only={card_data.get('family_only', False)}")
-                    debug_first_card = False
-
-                # Skip family-only listings
-                if card_data.get("family_only"):
-                    continue
-
-                # If we got rent from the card, we have enough data
-                has_data = card_data.get("rent", 0) > 0
-                listings.append({
-                    "id": lid,
-                    "url": full_url,
-                    "source": "NoBroker",
-                    "bhk": bhk,
-                    "locality": area_name.title(),
-                    "needs_verification": not has_data,
-                    **card_data,
-                })
-
-            # Also extract from script tag propertyId patterns
-            for script in soup.find_all("script"):
-                text = script.string or ""
-                pids = re.findall(r'"propertyId"\s*:\s*"([a-f0-9]{20,})"', text)
-                for pid in pids:
-                    lid = f"nb_{pid[:20]}"
-                    if not any(l["id"] == lid for l in listings):
-                        detail_url = (
-                            f"https://www.nobroker.in/property/"
-                            f"{bhk[0]}-bhk-apartment-for-rent-in-{area_name}"
-                            f"-hyderabad/{pid}/detail"
-                        )
-                        listings.append({
-                            "id": lid,
-                            "url": detail_url,
-                            "source": "NoBroker",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "needs_verification": True,
-                            "project": "Unknown",
-                            "rent": 0,
-                            "sqft": 0,
-                            "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [],
-                            "deposit": 0,
-                            "gated": False,
-                            "active": True,
-                        })
+            has_data = card_data.get("rent", 0) > 0
+            listings.append({
+                "id": lid, "url": full_url, "source": "NoBroker",
+                "bhk": bhk, "locality": area_name.title(),
+                "needs_verification": not has_data,
+                **card_data,
+            })
 
         print(f"  [NoBroker HTML] Found {len(listings)} listings in {area_name}")
 
@@ -604,22 +555,15 @@ def _nobroker_html(area_name, bhk):
     return listings[:15]
 
 
-def _extract_card_data(link_tag, bhk, area_name):
-    """Try to extract listing data from the HTML card surrounding a link."""
+def _extract_card_data(link_tag, bhk, area_name, property_id=""):
+    """Extract listing data from the HTML card surrounding a NoBroker link."""
     data = {
-        "project": "Unknown",
-        "rent": 0,
-        "sqft": 0,
-        "floor": 0,
-        "furnishing": "Unknown",
-        "bachelor_verified": False,
-        "images": [],
-        "deposit": 0,
-        "gated": False,
-        "active": True,
+        "project": "Unknown", "rent": 0, "sqft": 0, "floor": 0,
+        "furnishing": "Unknown", "bachelor_verified": False,
+        "images": [], "deposit": 0, "gated": False, "active": True,
     }
 
-    # Walk up to find card container (usually 3-5 levels up)
+    # Walk up to find card container
     card = link_tag
     for _ in range(6):
         if card.parent and card.parent.name not in ["body", "html", "[document]"]:
@@ -630,33 +574,23 @@ def _extract_card_data(link_tag, bhk, area_name):
     card_text = card.get_text(" ", strip=True)
 
     # ── Extract rent ──
-    # NoBroker format: "₹ 60,000 No Extra Maintenance Rent" or "₹ 30,000 + ₹ 2,000 Maintenance Rent"
-    # The ₹ might appear as \u20b9 or â¹ depending on encoding
-    rent = 0
-
-    # Try multiple patterns for rent
     for pattern in [
-        r'[\u20b9]\s*([\d,]+)',                          # ₹ 60,000
-        r'(\d[\d,]+)\s*(?:\+[^R]*)?\s*(?:No Extra\s+)?(?:Maintenance\s+)?Rent',  # 60,000 ... Rent
-        r'(\d[\d,]+)\s*(?:No Extra\s+)?Rent',            # 60,000 Rent
-        r'(\d[\d,]+)\s*/\s*month',                       # 60,000/month
+        r'[\u20b9]\s*([\d,]+)',
+        r'(\d[\d,]+)\s*(?:\+[^R]*)?\s*(?:No Extra\s+)?(?:Maintenance\s+)?Rent',
+        r'(\d[\d,]+)\s*(?:No Extra\s+)?Rent',
+        r'(\d[\d,]+)\s*/\s*month',
     ]:
         m = re.search(pattern, card_text, re.I)
         if m:
-            rent = int(m.group(1).replace(",", ""))
+            data["rent"] = int(m.group(1).replace(",", ""))
             break
-
-    # If still no rent, try: first big number (5 digits+) before "Rent" or "Deposit"
-    if rent == 0:
-        # Find all numbers >= 10000
+    if data["rent"] == 0:
         numbers = re.findall(r'(\d[\d,]+)', card_text)
         for num_str in numbers:
             num = int(num_str.replace(",", ""))
             if 5000 <= num <= 100000:
-                rent = num
+                data["rent"] = num
                 break
-
-    data["rent"] = rent
 
     # ── Extract deposit ──
     dep_match = re.search(r'([\d,]+)\s*Deposit', card_text, re.I)
@@ -670,28 +604,24 @@ def _extract_card_data(link_tag, bhk, area_name):
     if sqft_match:
         data["sqft"] = int(sqft_match.group(1).replace(",", ""))
 
-    # ── Extract floor ──
-    # NoBroker format: "1/8" (floor 1 of 8), or "5/16" (floor 5 of 16)
+    # ── Extract floor (NoBroker: X/Y format) ──
     floor_match = re.search(r'(\d+)\s*/\s*(\d+)', card_text)
     if floor_match:
         data["floor"] = int(floor_match.group(1))
-        # Also check: if it appears after sqft, it's floor/total (not part of rent)
     if not floor_match or data["floor"] == 0:
         floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
         if floor_match:
             data["floor"] = int(floor_match.group(1))
 
-    # ── Check tenant preference ──
-    # NoBroker shows: "All Preferred Tenants", "Family Preferred Tenants", "Bachelor Preferred Tenants"
+    # ── Tenant preference ──
     tenant_text = card_text.lower()
     if re.search(r'all\s+preferred\s+tenants|bachelor\s+preferred|anyone', tenant_text):
         data["bachelor_verified"] = True
     elif re.search(r'family\s+preferred\s+tenants|family\s+only', tenant_text):
         data["bachelor_verified"] = False
-        # Mark as family-only for filtering
         data["family_only"] = True
 
-    # ── Check furnishing ──
+    # ── Furnishing ──
     if "fully furnished" in tenant_text or "fully-furnished" in tenant_text:
         data["furnishing"] = "Fully Furnished"
     elif "semi furnished" in tenant_text or "semi-furnished" in tenant_text:
@@ -699,27 +629,23 @@ def _extract_card_data(link_tag, bhk, area_name):
     elif "unfurnished" in tenant_text:
         data["furnishing"] = "Unfurnished"
 
-    # ── Check gated/posh society ──
+    # ── Gated community ──
     if "posh society" in tenant_text or "gated" in tenant_text:
         data["gated"] = True
 
-    # ── Extract images from card ──
-    for img in card.find_all("img"):
-        src = img.get("src", "") or img.get("data-src", "") or img.get("data-original", "")
-        if not src or not src.startswith("http"):
-            continue
-        # Only include actual property images from NoBroker's CDN
-        if any(domain in src for domain in ["assets.nobroker.in", "nobroker.in/nb-new",
-                                             "images.nobroker.in", "cdn.nobroker.in"]):
-            if any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-                data["images"].append(src)
-        # Also accept other CDN image URLs
-        elif re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
-            if "logo" not in src.lower() and "icon" not in src.lower() and "avatar" not in src.lower():
-                data["images"].append(src)
+    # ── Extract images from card HTML ──
+    card_images = _extract_all_images_from_html(card, "NoBroker")
+    data["images"] = card_images[:5]
 
-    # ── Extract project name ──
-    # NoBroker card format: "3 BHK Apartment In <Project Name> for Rent"
+    # ── Construct CDN image URLs from property ID ──
+    # NoBroker CDN pattern: https://assets.nobroker.in/img/{pid}/large/{pid}_{n}.jpg
+    if property_id and len(data["images"]) < MIN_IMAGES:
+        for n in range(5):
+            cdn_url = f"https://assets.nobroker.in/img/{property_id}/large/{property_id}_{n}.jpg"
+            if cdn_url not in data["images"]:
+                data["images"].append(cdn_url)
+
+    # ── Project name ──
     proj_match = re.search(
         r'(?:\d\s*BHK\s*(?:Apartment|Flat|Villa|House)\s*In\s+)(.+?)(?:\s+for\s+Rent)',
         card_text, re.I
@@ -727,7 +653,6 @@ def _extract_card_data(link_tag, bhk, area_name):
     if proj_match:
         data["project"] = proj_match.group(1).strip()
     else:
-        # Fallback: extract from URL
         href = link_tag.get("href", "")
         name_match = re.search(r'in-([a-z][\w-]+)-hyderabad', href)
         if name_match:
@@ -754,46 +679,39 @@ def _parse_nobroker_property(prop, area_name, bhk):
     if rent > max_rent or rent < 3000:
         return None
 
-    # Tenant preference
     tenant = str(prop.get("tenantPreference", prop.get("leasetype", ""))).lower()
     bachelor_ok = any(kw in tenant for kw in ["bachelor", "anyone", "all", "single"])
     family_only = "family" in tenant and not bachelor_ok
     if family_only:
         return None
 
-    # Floor
     floor = safe_int(prop.get("floor", prop.get("floorNo", 0)))
-
-    # Images
     images = extract_images_from_photos(prop.get("photos", prop.get("images", [])))
 
-    # OG image fallback
     photo_url = prop.get("photoUrl", prop.get("thumbnailImage", ""))
     if photo_url and photo_url.startswith("http") and photo_url not in images:
         images.insert(0, photo_url)
 
-    # Project name
+    # Construct CDN image URLs if we don't have enough
+    if len(images) < MIN_IMAGES and prop_id:
+        for n in range(5):
+            cdn_url = f"https://assets.nobroker.in/img/{prop_id}/large/{prop_id}_{n}.jpg"
+            if cdn_url not in images:
+                images.append(cdn_url)
+
     project = prop.get("society", prop.get("title", prop.get("buildingName", "Unknown")))
     if isinstance(project, dict):
         project = project.get("name", "Unknown")
     if not project or project == "null":
         project = "Unknown"
 
-    # Sqft
     sqft = safe_int(prop.get("propertySize", prop.get("carpet_area",
                     prop.get("builtUpArea", prop.get("superBuiltupArea", 0)))))
-
-    # Furnishing
     furnishing = str(prop.get("furnishing", prop.get("furnishingType", "Unfurnished")))
-
-    # Deposit
     deposit = safe_int(prop.get("deposit", 0))
-
-    # Gated community
     prop_type = str(prop.get("type", prop.get("propertyType", ""))).lower()
     gated = any(kw in prop_type for kw in ["apartment", "gated"])
 
-    # Build detail URL
     detail_url = (
         f"https://www.nobroker.in/property/"
         f"{bhk[0]}-bhk-apartment-for-rent-in-{area_name}"
@@ -803,102 +721,14 @@ def _parse_nobroker_property(prop, area_name, bhk):
     return {
         "id": f"nb_{str(prop_id)[:20]}",
         "url": detail_url,
-        "rent": rent,
-        "sqft": sqft,
-        "floor": floor,
-        "furnishing": furnishing,
-        "bachelor_verified": bachelor_ok,
-        "project": project,
-        "locality": area_name.title(),
-        "images": images[:5],
-        "deposit": deposit,
-        "source": "NoBroker",
-        "bhk": bhk,
-        "gated": gated,
-        "active": True,
-        "needs_verification": False,  # complete data from API/JSON
+        "rent": rent, "sqft": sqft, "floor": floor,
+        "furnishing": furnishing, "bachelor_verified": bachelor_ok,
+        "project": project, "locality": area_name.title(),
+        "images": images[:6], "deposit": deposit,
+        "source": "NoBroker", "bhk": bhk,
+        "gated": gated, "active": True,
+        "needs_verification": False,
     }
-
-
-def verify_nobroker(listing):
-    """Verify a NoBroker listing by fetching its detail page."""
-    url = listing["url"]
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code != 200:
-            print(f"    [verify] HTTP {resp.status_code}")
-            return None
-
-        text = resp.text.lower()
-        for kw in REJECT_KEYWORDS:
-            if kw in text:
-                print(f"    [verify] Rejected: found '{kw}'")
-                return None
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        page_text = soup.get_text(" ", strip=True)
-
-        rent = safe_int(re.search(r'(?:rent|₹|rs\.?)\s*:?\s*([\d,]+)', page_text, re.I))
-        if isinstance(rent, re.Match):
-            rent = safe_int(rent.group(1))
-
-        rent_match = re.search(r'(?:rent|₹|rs\.?)\s*:?\s*([\d,]+)', page_text, re.I)
-        rent = int(rent_match.group(1).replace(",", "")) if rent_match else 0
-
-        sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', page_text, re.I)
-        sqft = int(sqft_match.group(1).replace(",", "")) if sqft_match else 0
-
-        floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)?\s*(?:floor|of\s*\d+)', page_text, re.I)
-        floor = int(floor_match.group(1)) if floor_match else 0
-
-        bachelor_ok = bool(re.search(r'bachelor|anyone|single\s*men', page_text, re.I))
-        if not bachelor_ok and re.search(r'lease\s*type\s*:?\s*family', page_text, re.I):
-            return None
-
-        furnishing = "Unfurnished"
-        if "fully furnished" in text:
-            furnishing = "Fully Furnished"
-        elif "semi-furnished" in text or "semi furnished" in text:
-            furnishing = "Semi-Furnished"
-
-        images = []
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            images.append(og_img["content"])
-        for img in soup.find_all("img"):
-            src = img.get("src", "") or img.get("data-src", "")
-            if "nobroker" in src and ("large" in src or "original" in src):
-                if src not in images:
-                    images.append(src)
-
-        locality = listing.get("locality", "")
-        for a in AREAS:
-            if a in page_text.lower():
-                locality = a.title()
-                break
-
-        title_tag = soup.find("title")
-        title = title_tag.get_text(strip=True) if title_tag else ""
-        project_match = re.search(r'in\s+(.+?)(?:,|\s+for\s+)', title, re.I)
-        project = project_match.group(1).strip() if project_match else listing.get("project", "Unknown")
-
-        return {
-            **listing,
-            "rent": rent if rent > 0 else listing.get("rent", 0),
-            "sqft": sqft if sqft > 0 else listing.get("sqft", 0),
-            "floor": floor if floor > 0 else listing.get("floor", 0),
-            "furnishing": furnishing,
-            "bachelor_verified": bachelor_ok,
-            "project": project,
-            "locality": locality,
-            "images": images[:5] if images else listing.get("images", []),
-            "active": True,
-            "needs_verification": False,
-        }
-
-    except Exception as e:
-        print(f"    [verify] Error: {e}")
-        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -907,21 +737,15 @@ def verify_nobroker(listing):
 
 def search_99acres(area_name, bhk="3bhk"):
     listings = []
-    bhk_num = bhk[0]  # "3" or "2"
-    # Correct URL: 3-bhk-flats-for-rent-in-kondapur-hyderabad-ffid
+    bhk_num = bhk[0]
     url = f"https://www.99acres.com/{bhk_num}-bhk-flats-for-rent-in-{area_name}-hyderabad-ffid"
     print(f"  [99acres] Fetching {bhk} in {area_name}...")
 
     try:
         resp = session.get(url, timeout=20, headers={
-            **HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
+            **BROWSER_HEADERS,
             "Referer": "https://www.99acres.com/",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "same-origin",
-            "Cache-Control": "max-age=0",
         })
         print(f"  [99acres] HTTP {resp.status_code}, size={len(resp.text)}")
         if resp.status_code != 200:
@@ -942,14 +766,13 @@ def search_99acres(area_name, bhk="3bhk"):
                                                           "https://www.99acres.com")
                         if listing:
                             listings.append(listing)
-                    print(f"  [99acres] Parsed {len(listings)} from __NEXT_DATA__")
                     if listings:
+                        print(f"  [99acres] Parsed {len(listings)} from __NEXT_DATA__")
                         return listings[:15]
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                print(f"  [99acres] __NEXT_DATA__ error: {e}")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
 
-        # Fallback: parse listing cards from HTML
-        # 99acres uses cards with rent, locality, images in the HTML
+        # Parse listing cards from HTML
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if not re.search(r'/(\d{6,})', href):
@@ -980,31 +803,32 @@ def search_99acres(area_name, bhk="3bhk"):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MagicBricks — correct URL suffix is pppfr
+# MagicBricks — query-param URL works best, parse embedded JSON for images
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_magicbricks(area_name, bhk="3bhk"):
     listings = []
     bhk_num = bhk[0]
-    # Try multiple URL formats
+    area_title = area_name.title()
+    max_rent = BUDGET.get(bhk, 65000)
+
+    # Query-param URL works best (returns 1.2MB page with data)
     urls_to_try = [
-        f"https://www.magicbricks.com/{bhk_num}-bhk-flats-for-rent-in-{area_name.title()}-Hyderabad-pppfr",
-        f"https://www.magicbricks.com/flats-for-rent-in-{area_name.title()}-Hyderabad-pppfr",
         (f"https://www.magicbricks.com/property-for-rent/residential-real-estate"
-         f"?bedroom={bhk_num}&proptype=Multistorey-Apartment,Builder-Floor-Apartment"
-         f"&cityName=Hyderabad&Locality={area_name.title()}"
-         f"&BudgetMin=0&BudgetMax={BUDGET.get(bhk, 65000)}"),
+         f"?bedroom={bhk_num}&proptype=Multistorey-Apartment,Builder-Floor-Apartment,Penthouse,Studio-Apartment"
+         f"&cityName=Hyderabad&Locality={area_title}"
+         f"&BudgetMin=0&BudgetMax={max_rent}"),
+        f"https://www.magicbricks.com/{bhk_num}-bhk-flats-for-rent-in-{area_title}-Hyderabad-pppfr",
+        f"https://www.magicbricks.com/flats-for-rent-in-{area_title}-Hyderabad-pppfr",
     ]
     print(f"  [MagicBricks] Fetching {bhk} in {area_name}...")
 
     for url in urls_to_try:
         try:
             resp = session.get(url, timeout=20, headers={
-                **HEADERS,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                **BROWSER_HEADERS,
                 "Referer": "https://www.magicbricks.com/",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
             })
             url_short = url.split("?")[0].split("/")[-1][:40]
             print(f"  [MagicBricks] {url_short} → HTTP {resp.status_code}, size={len(resp.text)}")
@@ -1014,120 +838,218 @@ def search_magicbricks(area_name, bhk="3bhk"):
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Try JSON-LD (structured data)
-            for script in soup.find_all("script", type="application/ld+json"):
-                try:
-                    data = json.loads(script.string)
-                    items = data if isinstance(data, list) else [data]
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        # Schema.org RealEstateListing or similar
-                        if item.get("@type") in ["RealEstateListing", "Product", "Offer"]:
-                            prop_url = item.get("url", "")
-                            if not prop_url:
-                                continue
-                            lid = f"mb_{hash(prop_url) % 10**10}"
-                            listings.append({
-                                "id": lid, "url": prop_url, "source": "MagicBricks",
-                                "bhk": bhk, "locality": area_name.title(),
-                                "needs_verification": True,
-                                "project": item.get("name", "Unknown"),
-                                "rent": 0, "sqft": 0, "floor": 0,
-                                "furnishing": "Unknown", "bachelor_verified": False,
-                                "images": [], "deposit": 0,
-                                "gated": False, "active": True,
-                            })
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # Parse listing cards from HTML
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                if not re.search(r'(\d{8,})', href):
-                    continue
-                if "property" not in href.lower() and "rent" not in href.lower():
-                    continue
-                id_match = re.search(r'(\d{8,})', href)
-                if not id_match:
-                    continue
-                full_url = urljoin("https://www.magicbricks.com", href)
-                lid = f"mb_{id_match.group(1)}"
-                if any(l["id"] == lid for l in listings):
+            # ── Strategy 1: Parse embedded JSON data from script tags ──
+            for script in soup.find_all("script"):
+                text = script.string or ""
+                if len(text) < 500:
                     continue
 
-                card_data = _extract_generic_card(link, bhk, area_name, "MagicBricks")
-                listings.append({
-                    "id": lid, "url": full_url, "source": "MagicBricks",
-                    "bhk": bhk, "locality": area_name.title(),
-                    "needs_verification": card_data.get("rent", 0) == 0,
-                    **card_data,
-                })
+                # Look for window.__INITIAL_DATA__ or similar embedded JSON
+                json_match = re.search(
+                    r'(?:window\.__INITIAL_DATA__|window\.__INITIAL_STATE__|'
+                    r'window\.mbData|window\.searchData|'
+                    r'var\s+searchData|var\s+propertyData)\s*=\s*(\{.+?\});?\s*(?:</script>|$)',
+                    text, re.S
+                )
+                if json_match:
+                    try:
+                        jdata = json.loads(json_match.group(1))
+                        props = _find_property_list(jdata)
+                        if props:
+                            print(f"  [MagicBricks] Found {len(props)} props in embedded JSON")
+                            for prop in props:
+                                listing = _parse_magicbricks_property(prop, area_name, bhk)
+                                if listing:
+                                    listings.append(listing)
+                            if listings:
+                                break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Also look for JSON arrays containing property-like objects
+                if '"propertyId"' in text or '"propId"' in text or '"id"' in text:
+                    # Try to find a JSON array
+                    array_match = re.search(r'(\[\s*\{[^;]{100,}?\}\s*\])', text, re.S)
+                    if array_match:
+                        try:
+                            arr = json.loads(array_match.group(1))
+                            if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+                                if any(k in arr[0] for k in ["propertyId", "propId", "id", "rent"]):
+                                    print(f"  [MagicBricks] Found JSON array with {len(arr)} items")
+                                    for prop in arr:
+                                        listing = _parse_magicbricks_property(prop, area_name, bhk)
+                                        if listing:
+                                            listings.append(listing)
+                                    if listings:
+                                        break
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+            # ── Strategy 2: Parse HTML cards ──
+            if not listings:
+                for link in soup.find_all("a", href=True):
+                    href = link["href"]
+                    # MagicBricks property URLs contain long numeric IDs
+                    if not re.search(r'(\d{8,})', href):
+                        continue
+                    # Must be a property link
+                    if not any(kw in href.lower() for kw in ["property", "rent", "flat", "apartment", "bhk"]):
+                        continue
+                    id_match = re.search(r'(\d{8,})', href)
+                    if not id_match:
+                        continue
+                    full_url = urljoin("https://www.magicbricks.com", href)
+                    lid = f"mb_{id_match.group(1)}"
+                    if any(l["id"] == lid for l in listings):
+                        continue
+
+                    card_data = _extract_generic_card(link, bhk, area_name, "MagicBricks")
+                    listings.append({
+                        "id": lid, "url": full_url, "source": "MagicBricks",
+                        "bhk": bhk, "locality": area_name.title(),
+                        "needs_verification": card_data.get("rent", 0) == 0,
+                        **card_data,
+                    })
 
             if listings:
-                break  # found results with this URL format
+                break
 
         except Exception as e:
             print(f"  [MagicBricks] Error: {e}")
+            traceback.print_exc()
 
     print(f"  [MagicBricks] Found {len(listings)} in {area_name}")
     return listings[:15]
 
 
+def _parse_magicbricks_property(prop, area_name, bhk):
+    """Parse a MagicBricks property from JSON data."""
+    if not isinstance(prop, dict):
+        return None
+
+    prop_id = str(prop.get("propertyId", prop.get("propId", prop.get("id", ""))))
+    if not prop_id:
+        return None
+
+    rent = safe_int(prop.get("price", prop.get("rent", prop.get("expectedRent",
+                    prop.get("rentAmount", 0)))))
+    max_rent = BUDGET.get(bhk, 65000)
+    if rent > max_rent or rent < 3000:
+        return None
+
+    # Images
+    images = []
+    for key in ["images", "photos", "photoGallery", "gallery", "multiImage",
+                "imageList", "originalPhotos", "allImages"]:
+        img_data = prop.get(key)
+        if isinstance(img_data, list):
+            for img in img_data[:6]:
+                if isinstance(img, str) and img.startswith("http"):
+                    images.append(img)
+                elif isinstance(img, dict):
+                    for img_key in ["largeImageUrl", "originalUrl", "url", "src",
+                                     "largeImage", "mediumImageUrl", "thumbUrl"]:
+                        u = img.get(img_key, "")
+                        if u and u.startswith("http"):
+                            images.append(u)
+                            break
+            if images:
+                break
+
+    # Single image fields
+    for key in ["thumbnailUrl", "mainImage", "coverImage", "photoUrl",
+                "largeImageUrl", "imageUrl", "originalImageUrl"]:
+        u = prop.get(key, "")
+        if isinstance(u, str) and u.startswith("http") and u not in images:
+            images.insert(0, u)
+
+    # MagicBricks CDN image construction
+    # Pattern: https://img.staticmb.com/mbphoto/{id}/original/{id}_{n}_800.jpg
+    if len(images) < MIN_IMAGES and prop_id:
+        for n in range(1, 6):
+            cdn_url = f"https://img.staticmb.com/mbphoto/{prop_id}/original/{prop_id}_{n}_800.jpg"
+            if cdn_url not in images:
+                images.append(cdn_url)
+
+    prop_url = prop.get("url", prop.get("propertyUrl", prop.get("detailUrl", "")))
+    if prop_url and not prop_url.startswith("http"):
+        prop_url = urljoin("https://www.magicbricks.com", prop_url)
+
+    project = str(prop.get("society", prop.get("projectName",
+                  prop.get("buildingName", prop.get("title", "Unknown")))))
+
+    sqft = safe_int(prop.get("area", prop.get("builtupArea",
+            prop.get("carpetArea", prop.get("superArea", 0)))))
+    floor = safe_int(prop.get("floor", prop.get("floorNo", 0)))
+    furnishing = str(prop.get("furnishing", prop.get("furnishType", "Unknown")))
+
+    return {
+        "id": f"mb_{prop_id}",
+        "url": prop_url or f"https://www.magicbricks.com/propertyDetails/{prop_id}",
+        "rent": rent, "sqft": sqft, "floor": floor,
+        "furnishing": furnishing, "bachelor_verified": False,
+        "project": project, "locality": area_name.title(),
+        "images": images[:6], "deposit": safe_int(prop.get("securityDeposit", 0)),
+        "source": "MagicBricks", "bhk": bhk,
+        "gated": False, "active": True,
+        "needs_verification": False,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# Housing.com — uses initialState JSON embed + correct URL
+# Housing.com — needs proper browser headers to avoid 406
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_housing(area_name, bhk="3bhk"):
     listings = []
     bhk_num = bhk[0]
-    # Try multiple URL formats
+    area_lower = area_name.lower()
+
+    # Housing.com URL formats
     urls_to_try = [
-        f"https://housing.com/in/rent/{bhk_num}-bhk-flats-for-rent-in-{area_name}-hyderabad",
-        f"https://housing.com/in/rent/real-estate-{area_name}-hyderabad",
-        f"https://housing.com/in/rent/{area_name}-hyderabad",
+        f"https://housing.com/in/buy/search?f=eyJiYXNlIjpbeyJ0eXBlIjoiQ0lUWSIsInZhbHVlIjoiMzI0NiIsInByaW1hcnkiOnRydWV9XSwicHJpY2UiOnsiZiI6MCwidCI6ezNiaGs9NjUwMDAsMmJoaz00MDAwMH19fQ==",
+        f"https://housing.com/in/rent/{bhk_num}-bhk-house-for-rent-in-{area_lower}-hyderabad",
+        f"https://housing.com/in/rent/property-for-rent-in-{area_lower}-hyderabad",
+        f"https://housing.com/in/rent/search?f=eyJ0eXBlIjoiUkVOVCJ9",
     ]
     print(f"  [Housing.com] Fetching {bhk} in {area_name}...")
 
     for url in urls_to_try:
         try:
             resp = session.get(url, timeout=20, headers={
-                **HEADERS,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                **BROWSER_HEADERS,
                 "Referer": "https://housing.com/",
-            }, cookies={
-                "service": "rent",
-                "category": "residential",
-                "cityUrl": "hyderabad",
+                "Sec-Fetch-Site": "same-origin",
+                "Host": "housing.com",
             })
             url_short = url.split("/")[-1][:50]
             print(f"  [Housing.com] {url_short} → HTTP {resp.status_code}, size={len(resp.text)}")
 
-            if resp.status_code != 200 or len(resp.text) < 3000:
+            if resp.status_code != 200:
+                continue
+            if len(resp.text) < 3000:
                 continue
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Housing.com embeds data in <script id="initialState">
+            # Try initialState
             init_script = soup.find("script", id="initialState")
             if init_script and init_script.string:
                 try:
                     init_data = json.loads(init_script.string)
-                    # Search for property list in the JSON
                     cards = _find_property_list(init_data)
                     if cards:
                         for prop in cards:
                             listing = _parse_generic_property(
-                                prop, area_name, bhk, "Housing.com",
-                                "https://housing.com"
+                                prop, area_name, bhk, "Housing.com", "https://housing.com"
                             )
                             if listing:
                                 listings.append(listing)
-                        print(f"  [Housing.com] Parsed {len(listings)} from initialState")
                         if listings:
+                            print(f"  [Housing.com] Parsed {len(listings)} from initialState")
                             return listings[:15]
-                except (json.JSONDecodeError, TypeError) as e:
-                    print(f"  [Housing.com] initialState parse error: {e}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
             # Try __NEXT_DATA__
             next_tag = soup.find("script", id="__NEXT_DATA__")
@@ -1138,33 +1060,58 @@ def search_housing(area_name, bhk="3bhk"):
                     if cards:
                         for prop in cards:
                             listing = _parse_generic_property(
-                                prop, area_name, bhk, "Housing.com",
-                                "https://housing.com"
+                                prop, area_name, bhk, "Housing.com", "https://housing.com"
                             )
                             if listing:
                                 listings.append(listing)
                         if listings:
-                            print(f"  [Housing.com] Parsed {len(listings)} from __NEXT_DATA__")
                             return listings[:15]
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            # Try embedded JSON in any script
+            for script in soup.find_all("script"):
+                text = script.string or ""
+                if len(text) < 200:
+                    continue
+                json_match = re.search(
+                    r'(?:window\.__INITIAL_STATE__|window\.__STORE_DATA__|'
+                    r'window\.initialState)\s*=\s*(\{.+?\});?\s*(?:</script>|$)',
+                    text, re.S
+                )
+                if json_match:
+                    try:
+                        jdata = json.loads(json_match.group(1))
+                        cards = _find_property_list(jdata)
+                        if cards:
+                            for prop in cards:
+                                listing = _parse_generic_property(
+                                    prop, area_name, bhk, "Housing.com", "https://housing.com"
+                                )
+                                if listing:
+                                    listings.append(listing)
+                            if listings:
+                                break
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
             # Fallback: parse links
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                if re.search(r'/(\d{8,})', href) and "rent" in href.lower():
-                    id_match = re.search(r'/(\d{8,})', href)
-                    if id_match:
-                        full_url = urljoin("https://housing.com", href)
-                        lid = f"hc_{id_match.group(1)}"
-                        if not any(l["id"] == lid for l in listings):
-                            card_data = _extract_generic_card(link, bhk, area_name, "Housing.com")
-                            listings.append({
-                                "id": lid, "url": full_url, "source": "Housing.com",
-                                "bhk": bhk, "locality": area_name.title(),
-                                "needs_verification": card_data.get("rent", 0) == 0,
-                                **card_data,
-                            })
+            if not listings:
+                for link in soup.find_all("a", href=True):
+                    href = link["href"]
+                    if re.search(r'/(\d{8,})', href) and "rent" in href.lower():
+                        id_match = re.search(r'/(\d{8,})', href)
+                        if id_match:
+                            full_url = urljoin("https://housing.com", href)
+                            lid = f"hc_{id_match.group(1)}"
+                            if not any(l["id"] == lid for l in listings):
+                                card_data = _extract_generic_card(link, bhk, area_name, "Housing.com")
+                                listings.append({
+                                    "id": lid, "url": full_url, "source": "Housing.com",
+                                    "bhk": bhk, "locality": area_name.title(),
+                                    "needs_verification": card_data.get("rent", 0) == 0,
+                                    **card_data,
+                                })
 
             if listings:
                 break
@@ -1177,69 +1124,111 @@ def search_housing(area_name, bhk="3bhk"):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SquareYards — SSR HTML, lowest anti-bot, parse card data directly
+# SquareYards — SSR HTML, lowest anti-bot
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_squareyards(area_name, bhk="3bhk"):
     listings = []
     bhk_num = bhk[0]
-    url = f"https://www.squareyards.com/rent/{bhk_num}-bhk-for-rent-in-{area_name}-hyderabad"
+    area_lower = area_name.lower()
+
+    # Try multiple URL formats
+    urls_to_try = [
+        f"https://www.squareyards.com/rent/{bhk_num}-bhk-for-rent-in-{area_lower}-hyderabad",
+        f"https://www.squareyards.com/rent/property-for-rent-in-{area_lower}-hyderabad",
+        f"https://www.squareyards.com/rent/flats-for-rent-in-{area_lower}-hyderabad",
+        f"https://www.squareyards.com/{bhk_num}-bhk-flats-for-rent-in-{area_lower}-hyderabad",
+    ]
     print(f"  [SquareYards] Fetching {bhk} in {area_name}...")
 
-    try:
-        resp = session.get(url, timeout=20, headers={
-            **HEADERS,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": "https://www.squareyards.com/",
-        })
-        print(f"  [SquareYards] HTTP {resp.status_code}, size={len(resp.text)}")
-        if resp.status_code != 200:
-            return listings
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # SquareYards is SSR — parse listing data directly from HTML
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            if "rental-" not in href:
-                continue
-            id_match = re.search(r'/(\d{6,})', href)
-            if not id_match:
-                continue
-
-            full_url = urljoin("https://www.squareyards.com", href)
-            lid = f"sy_{id_match.group(1)}"
-            if any(l["id"] == lid for l in listings):
-                continue
-
-            # Parse card data from surrounding HTML
-            card_data = _extract_generic_card(link, bhk, area_name, "SquareYards")
-
-            # SquareYards-specific: extract images from card
-            card = link
-            for _ in range(6):
-                if card.parent and card.parent.name not in ["body", "html", "[document]"]:
-                    card = card.parent
-                else:
-                    break
-            images = []
-            for img in card.find_all("img"):
-                src = img.get("src", "") or img.get("data-src", "")
-                if src and src.startswith("http") and "img.squareyards.com" in src:
-                    clean = src.split("?")[0]
-                    if clean not in images:
-                        images.append(clean)
-            card_data["images"] = images[:5]
-
-            listings.append({
-                "id": lid, "url": full_url, "source": "SquareYards",
-                "bhk": bhk, "locality": area_name.title(),
-                "needs_verification": card_data.get("rent", 0) == 0,
-                **card_data,
+    for url in urls_to_try:
+        try:
+            resp = session.get(url, timeout=20, headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.squareyards.com/",
+                "Sec-Fetch-Site": "same-origin",
             })
+            print(f"  [SquareYards] {url.split('/')[-1][:50]} → HTTP {resp.status_code}, size={len(resp.text)}")
+            if resp.status_code != 200 or len(resp.text) < 5000:
+                continue
 
-    except Exception as e:
-        print(f"  [SquareYards] Error: {e}")
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # SquareYards is SSR — look for property links with various patterns
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                # SquareYards links may contain: rental-, rent, property, apartment, flat
+                if not any(kw in href.lower() for kw in ["rental", "rent", "apartment", "flat", "property"]):
+                    continue
+                # Must have a numeric ID
+                id_match = re.search(r'[-/](\d{5,})', href)
+                if not id_match:
+                    continue
+                # Skip navigation/category links
+                if href.count("/") < 2:
+                    continue
+
+                full_url = urljoin("https://www.squareyards.com", href)
+                lid = f"sy_{id_match.group(1)}"
+                if any(l["id"] == lid for l in listings):
+                    continue
+
+                card_data = _extract_generic_card(link, bhk, area_name, "SquareYards")
+
+                # SquareYards-specific: extract images from card
+                card = link
+                for _ in range(6):
+                    if card.parent and card.parent.name not in ["body", "html", "[document]"]:
+                        card = card.parent
+                    else:
+                        break
+                sy_images = _extract_all_images_from_html(card, "SquareYards")
+                if sy_images:
+                    card_data["images"] = sy_images[:5]
+
+                listings.append({
+                    "id": lid, "url": full_url, "source": "SquareYards",
+                    "bhk": bhk, "locality": area_name.title(),
+                    "needs_verification": card_data.get("rent", 0) == 0,
+                    **card_data,
+                })
+
+            if listings:
+                break
+
+        except Exception as e:
+            print(f"  [SquareYards] Error: {e}")
+
+    # Also try SquareYards search API
+    if not listings:
+        try:
+            api_url = "https://www.squareyards.com/api/rent/search"
+            api_resp = session.get(api_url, params={
+                "city": "hyderabad",
+                "locality": area_name,
+                "bedrooms": bhk[0],
+                "page": 1,
+            }, timeout=15, headers={
+                **HEADERS,
+                "Accept": "application/json",
+                "Referer": f"https://www.squareyards.com/rent/{bhk[0]}-bhk-for-rent-in-{area_lower}-hyderabad",
+            })
+            if api_resp.status_code == 200:
+                try:
+                    data = api_resp.json()
+                    props = _find_property_list(data)
+                    if props:
+                        print(f"  [SquareYards] API returned {len(props)} properties")
+                        for prop in props:
+                            listing = _parse_generic_property(
+                                prop, area_name, bhk, "SquareYards", "https://www.squareyards.com"
+                            )
+                            if listing:
+                                listings.append(listing)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except Exception:
+            pass
 
     print(f"  [SquareYards] Found {len(listings)} in {area_name}")
     return listings[:15]
@@ -1280,7 +1269,6 @@ def _parse_generic_property(prop, area_name, bhk, source, base_url):
                         images.append(u)
             if images:
                 break
-    # og / thumbnail fallback
     for key in ["thumbnailUrl", "mainImage", "coverImage", "photoUrl"]:
         u = prop.get(key, "")
         if isinstance(u, str) and u.startswith("http") and u not in images:
@@ -1311,7 +1299,7 @@ def _parse_generic_property(prop, area_name, bhk, source, base_url):
 
 
 def _extract_generic_card(link_tag, bhk, area_name, source):
-    """Extract listing data from an HTML card surrounding a link. Works across platforms."""
+    """Extract listing data from an HTML card surrounding a link."""
     data = {
         "project": "Unknown", "rent": 0, "sqft": 0, "floor": 0,
         "furnishing": "Unknown", "bachelor_verified": False,
@@ -1327,7 +1315,7 @@ def _extract_generic_card(link_tag, bhk, area_name, source):
 
     card_text = card.get_text(" ", strip=True)
 
-    # Rent (multiple patterns)
+    # Rent
     for pattern in [
         r'[\u20b9]\s*([\d,]+)',
         r'(\d[\d,]+)\s*(?:\+[^R]*)?\s*(?:No Extra\s+)?(?:Maintenance\s+)?Rent',
@@ -1394,31 +1382,24 @@ def _extract_generic_card(link_tag, bhk, area_name, source):
     if proj_match:
         data["project"] = proj_match.group(1).strip()
 
-    # Images
-    for img in card.find_all("img"):
-        src = img.get("src", "") or img.get("data-src", "") or img.get("data-original", "")
-        if src and src.startswith("http"):
-            if re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
-                if not any(kw in src.lower() for kw in ["logo", "icon", "avatar", "placeholder"]):
-                    data["images"].append(src)
+    # Images — use the comprehensive extractor
+    card_images = _extract_all_images_from_html(card, source)
+    data["images"] = card_images[:5]
 
     return data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Generic detail-page verifier (for listings needing verification)
+# Generic detail-page verifier
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def verify_detail_page(listing):
-    """
-    Fetch detail page and extract data. Returns updated listing or None.
-    Used for listings that only have a URL from HTML link extraction.
-    """
+    """Fetch detail page and extract data. Returns updated listing or None."""
     url = listing["url"]
     source = listing["source"]
 
     try:
-        resp = session.get(url, timeout=15)
+        resp = session.get(url, timeout=15, headers=BROWSER_HEADERS)
         if resp.status_code != 200:
             print(f"    [verify {source}] HTTP {resp.status_code}")
             return None
@@ -1426,80 +1407,65 @@ def verify_detail_page(listing):
         text = resp.text.lower()
         for kw in REJECT_KEYWORDS:
             if kw in text:
-                print(f"    [verify {source}] Rejected: '{kw}'")
                 return None
-        if source == "SquareYards":
-            for kw in ["sold", "rented out", "currently unavailable"]:
-                if kw in text:
-                    print(f"    [verify {source}] Rejected: '{kw}'")
-                    return None
 
         soup = BeautifulSoup(resp.text, "html.parser")
         page_text = soup.get_text(" ", strip=True)
 
-        # Extract rent
         rent_match = re.search(r'(?:rent|₹|rs\.?)\s*:?\s*([\d,]+)', page_text, re.I)
         rent = int(rent_match.group(1).replace(",", "")) if rent_match else 0
 
-        # Budget check
         bhk = listing.get("bhk", "3bhk")
         max_rent = BUDGET.get(bhk, 65000)
         if rent > max_rent:
             return None
         if rent == 0:
-            # Can't determine rent from page — skip (not permanently reject)
             return None
 
-        # Sqft
         sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', page_text, re.I)
         sqft = int(sqft_match.group(1).replace(",", "")) if sqft_match else 0
 
-        # Floor
         floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)?\s*(?:floor|of\s*\d+)', page_text, re.I)
         floor = int(floor_match.group(1)) if floor_match else 0
 
-        # Bachelor check
-        bachelor_ok = bool(re.search(r'bachelor|anyone|single\s*men|all\b', page_text, re.I))
+        bachelor_ok = bool(re.search(r'bachelor|anyone|single\s*men', page_text, re.I))
         if not bachelor_ok and re.search(r'family\s*only|lease\s*type\s*:?\s*family', page_text, re.I):
-            print(f"    [verify {source}] Rejected: family only")
             return None
 
-        # Furnishing
         furnishing = "Unfurnished"
         if "fully furnished" in text:
             furnishing = "Fully Furnished"
         elif "semi-furnished" in text or "semi furnished" in text:
             furnishing = "Semi-Furnished"
 
-        # Images
-        images = []
+        images = _extract_all_images_from_html(soup, source)
+
+        # og:image
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            images.append(og_img["content"])
+            img_url = og_img["content"]
+            if img_url.startswith("http") and img_url not in images:
+                images.insert(0, img_url)
 
-        # Locality
         locality = listing.get("locality", "")
         for a in AREAS:
             if a in page_text.lower():
                 locality = a.title()
                 break
 
-        # Project name
         title_tag = soup.find("title")
         project = title_tag.get_text(strip=True).split(" - ")[0].split("|")[0].strip() if title_tag else "Unknown"
 
         return {
             **listing,
-            "rent": rent,
-            "sqft": sqft,
-            "floor": floor,
+            "rent": rent if rent > 0 else listing.get("rent", 0),
+            "sqft": sqft if sqft > 0 else listing.get("sqft", 0),
+            "floor": floor if floor > 0 else listing.get("floor", 0),
             "furnishing": furnishing,
             "bachelor_verified": bachelor_ok,
-            "project": project,
-            "locality": locality,
-            "images": images[:5],
-            "active": True,
-            "needs_verification": False,
+            "project": project, "locality": locality,
+            "images": images[:6] if images else listing.get("images", []),
+            "active": True, "needs_verification": False,
         }
 
     except Exception as e:
@@ -1559,10 +1525,10 @@ def run():
     complete = [l for l in unique if not l.get("needs_verification")]
     needs_verify = [l for l in unique if l.get("needs_verification")]
 
-    print(f"  Complete (from API/JSON): {len(complete)}")
+    print(f"  Complete (from API/JSON/cards): {len(complete)}")
     print(f"  Needs verification: {len(needs_verify)}")
 
-    # ── Step 4: Verify incomplete listings (cap at 15 to stay within timeout) ──
+    # ── Step 4: Verify incomplete listings (cap at 15) ──
     verified_from_pages = []
     for listing in needs_verify[:15]:
         print(f"  Verifying {listing['source']}: {listing['url'][:75]}...")
@@ -1571,17 +1537,29 @@ def run():
             verified_from_pages.append(result)
             print(f"    ✅ Verified — ₹{result['rent']}")
         else:
-            # Don't permanently reject — verification might fail due to bot blocking
-            # Only add to rejected if we got a clear signal (family only, etc.)
-            print(f"    ⚠️ Could not verify (may be bot-blocked)")
+            print(f"    ⚠️ Could not verify")
         time.sleep(0.5)
 
-    # Combine
     all_verified = complete + verified_from_pages
     print(f"\nTotal verified: {len(all_verified)}")
 
-    # ── Step 5: Budget & basic filters ──
-    MIN_IMAGES = 3  # minimum images required to share a listing
+    # ── Step 5: IMAGE ENRICHMENT — fetch images for listings with <3 ──
+    low_image_listings = [l for l in all_verified if len(l.get("images", [])) < MIN_IMAGES]
+    print(f"\nImage enrichment: {len(low_image_listings)} listings need more images")
+
+    enriched_count = 0
+    for listing in low_image_listings[:20]:  # Cap at 20 to stay within timeout
+        old_count = len(listing.get("images", []))
+        listing["images"] = _enrich_images_from_url(listing)
+        new_count = len(listing.get("images", []))
+        if new_count > old_count:
+            enriched_count += 1
+            print(f"  [enrich] {listing['source']} {listing['id']}: {old_count} → {new_count} images")
+        time.sleep(0.3)
+
+    print(f"  Enriched {enriched_count} listings with additional images")
+
+    # ── Step 6: Budget & image filters ──
     qualified = []
     no_images_count = 0
     for listing in all_verified:
@@ -1593,7 +1571,6 @@ def run():
             state["rejected"].append({"id": listing["id"], "reason": "budget"})
             continue
 
-        # Require minimum images for sharing
         img_count = len(listing.get("images", []))
         if img_count < MIN_IMAGES:
             no_images_count += 1
@@ -1603,14 +1580,20 @@ def run():
         listing["score"] = score_listing(listing)
         qualified.append(listing)
 
-    # Sort by score
     qualified.sort(key=lambda x: x["score"], reverse=True)
     top_picks = qualified[:8]
 
     print(f"Qualified after scoring: {len(qualified)} (skipped {no_images_count} with <{MIN_IMAGES} images)")
     print(f"Sending top {len(top_picks)} to Telegram")
 
-    # ── Step 6: Send to Telegram ──
+    # Log source breakdown
+    source_counts = {}
+    for l in qualified:
+        src = l["source"]
+        source_counts[src] = source_counts.get(src, 0) + 1
+    print(f"Source breakdown: {source_counts}")
+
+    # ── Step 7: Send to Telegram ──
     if top_picks:
         sources = sorted(set(p["source"] for p in top_picks))
         tg_send_message(
@@ -1667,7 +1650,7 @@ def run():
             f"⏰ Will check again in ~6 hours."
         )
 
-    # ── Step 7: Save state ──
+    # ── Step 8: Save state ──
     state["rejected"] = state["rejected"][-200:]
     save_state(state)
     print(f"\n✅ Done. {len(top_picks)} listings sent to Telegram.\n")
