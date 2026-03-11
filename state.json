@@ -319,6 +319,86 @@
       "source": "NoBroker",
       "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-gachibowli-hyderabad-for-rs-35000/8a9f8a84998e46ef01998eacb21b1a84/detail",
       "sent_at": "11 Mar 2026 12:14 AM IST"
+    },
+    {
+      "id": "nb_8a9f92a976189ffb0176",
+      "project": "Sivaa Shakthi The Lawnz",
+      "rent": 45000,
+      "bhk": "3bhk",
+      "locality": "Kokapet",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-kokapet-hyderabad-for-rs-45000/8a9f92a976189ffb017618d08e3d1025/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8a9f9b8e9893b44e0198",
+      "project": "Apartment",
+      "rent": 18000,
+      "bhk": "2bhk",
+      "locality": "Kokapet",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-narsingi-hyderabad-for-rs-18000/8a9f9b8e9893b44e019893cacf0e08f7/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8aa9b3eb9c932de8019c",
+      "project": "Mahati Apartment, Kondapur",
+      "rent": 14000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-14000/8aa9b3eb9c932de8019c937101e41d75/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8aa990849cd6fc59019c",
+      "project": "N Rresidency",
+      "rent": 14500,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-n-residency-hyderabad-for-rs-14500/8aa990849cd6fc59019cd795df0a4bed/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8a9ff482866732990186",
+      "project": "Avn Residency",
+      "rent": 38000,
+      "bhk": "2bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-38000/8a9ff48286673299018667438b3300d9/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8aa9bb319b92a79b019b",
+      "project": "Sri Vishwa Sai Isha Apartment",
+      "rent": 39000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-kondapur-hyderabad-for-rs-39000/8aa9bb319b92a79b019b92cb65fb0e42/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8a9fb98594354c610194",
+      "project": "Manjula Residency",
+      "rent": 32000,
+      "bhk": "2bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-raghavendra-colony-hyderabad-for-rs-32000/8a9fb98594354c610194358932b01e0d/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
+    },
+    {
+      "id": "nb_8aa995579cbd3c8c019c",
+      "project": "Rajapushpa Regalia",
+      "rent": 60000,
+      "bhk": "3bhk",
+      "locality": "Kokapet",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-kokapet-hyderabad-for-rs-60000/8aa995579cbd3c8c019cbd8cf3a023e2/detail",
+      "sent_at": "11 Mar 2026 07:22 AM IST"
     }
   ],
   "rejected": [
@@ -407,5 +487,5 @@
       "reason": "budget"
     }
   ],
-  "last_run": "2026-03-11T00:15:33.795473+05:30"
+  "last_run": "2026-03-11T07:23:56.309877+05:30"
 }
