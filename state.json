@@ -1,1 +1,179 @@
-{"sent": [], "rejected": [], "last_run": null}
+{
+  "sent": [
+    {
+      "id": "nb_8aa9b00a9c9d7ad4019c",
+      "project": "Unknown",
+      "rent": 42000,
+      "bhk": "3bhk",
+      "locality": "Gachibowli",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/3-bhk-apartment-for-rent-in-gachibowli-hyderabad-for-rs-42000/8aa9b00a9c9d7ad4019c9e3994b15e7d/detail",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "mb_423831373830393337",
+      "project": "Unknown",
+      "rent": 4500,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "MagicBricks",
+      "url": "https://www.magicbricks.com/propertyDetails/3-BHK-1570-Sq-ft-Multistorey-Apartment-FOR-Rent-Kondapur-in-Hyderabad&id=4d423831373830393337",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "hc_19396528",
+      "project": "3 BHK Flat",
+      "rent": 48000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "Housing.com",
+      "url": "https://housing.com/rent/19396528-1750-sqft-3-bhk-apartment-on-rent-in-kondapur-hyderabad",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "sy_10061022",
+      "project": "Aurobindo The Regent",
+      "rent": 57000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "SquareYards",
+      "url": "https://www.squareyards.com/rental-3-bhk-pooja-room-1636-sq-ft-apartment-in-aurobindo-the-regent/10061022",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "nb_8a9f8245758ec3790175",
+      "project": "Sri Ram Nagar Laxmi Nagar",
+      "rent": 30000,
+      "bhk": "2bhk",
+      "locality": "Kondapur",
+      "source": "NoBroker",
+      "url": "https://www.nobroker.in/property/2-bhk-apartment-for-rent-in-sri-ram-nagar-laxmi-nagar-hyderabad-for-rs-30000/8a9f8245758ec379017591145f83570e/detail",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "mb_423833333733353739",
+      "project": "Unknown",
+      "rent": 5000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "MagicBricks",
+      "url": "https://www.magicbricks.com/propertyDetails/3-BHK-2100-Sq-ft-Multistorey-Apartment-FOR-Rent-Kondapur-in-Hyderabad&id=4d423833333733353739",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "hc_19546103",
+      "project": "3 BHK Flat",
+      "rent": 36000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "Housing.com",
+      "url": "https://housing.com/rent/19546103-1550-sqft-3-bhk-apartment-on-rent-in-kondapur-hyderabad",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    },
+    {
+      "id": "sy_9725378",
+      "project": "GHR Titania",
+      "rent": 56000,
+      "bhk": "3bhk",
+      "locality": "Kondapur",
+      "source": "SquareYards",
+      "url": "https://www.squareyards.com/rental-3-bhk-pooja-room-1766-sq-ft-apartment-in-ghr-titania/9725378",
+      "sent_at": "11 Mar 2026 11:55 AM IST"
+    }
+  ],
+  "rejected": [
+    {
+      "id": "nb_8a9f91038f1a13e9018f",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f8c83919cf2db0191",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9aeb39cd6527f019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f8e4390d41b030190",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9fc0828215ea140182",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9b9d79c372054019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9a26f9cbd3c91019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f884391bcb4be0191",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9a75b9ca1a98c019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9b3e99cb21487019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f8a8597c3892b0197",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9bf8e9ca4c64a019c",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f914d7602b9da0176",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9f85c38f6978df018f",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9fce8b8470708d0184",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8a9fce82844c65660184",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_ff8081816d7fdfaa016d",
+      "reason": "budget"
+    },
+    {
+      "id": "nb_8aa9ac639bbb9fa3019b",
+      "reason": "budget"
+    },
+    {
+      "id": "mb_423833323637383939",
+      "reason": "budget"
+    },
+    {
+      "id": "mb_423539363931373835",
+      "reason": "budget"
+    },
+    {
+      "id": "mb_423833353339363137",
+      "reason": "budget"
+    },
+    {
+      "id": "mb_423833373233343931",
+      "reason": "only 1 images (need 3)"
+    },
+    {
+      "id": "mb_423832383334383531",
+      "reason": "only 0 images (need 3)"
+    }
+  ],
+  "last_run": "2026-03-11T12:01:01.359638+05:30"
+}
