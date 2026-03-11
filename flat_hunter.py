@@ -2123,23 +2123,37 @@ def run():
 
     qualified.sort(key=lambda x: x["score"], reverse=True)
 
-    # Select top picks with source diversity: ensure each source gets representation
-    top_picks = []
-    picks_by_source = {}
-    MAX_PER_SOURCE = 4  # max listings from any single source in top picks
+    # Select top picks with round-robin source diversity:
+    # Group by source (each group sorted by score), then interleave picks
+    SEND_COUNT = 8
+    by_source_sorted = {}
     for listing in qualified:
-        src = listing["source"]
-        if picks_by_source.get(src, 0) < MAX_PER_SOURCE:
-            top_picks.append(listing)
-            picks_by_source[src] = picks_by_source.get(src, 0) + 1
-        if len(top_picks) >= 8:
-            break
-    # If we don't have 8 yet, fill with remaining by score
-    if len(top_picks) < 8:
-        for listing in qualified:
-            if listing not in top_picks:
+        by_source_sorted.setdefault(listing["source"], []).append(listing)
+    # Each source list is already score-sorted since qualified is sorted
+
+    top_picks = []
+    picked_ids = set()
+    source_names = list(by_source_sorted.keys())
+    source_iters = {s: iter(listings) for s, listings in by_source_sorted.items()}
+
+    # Round-robin: pick one from each source per round
+    while len(top_picks) < SEND_COUNT and source_iters:
+        for src in list(source_iters.keys()):
+            if len(top_picks) >= SEND_COUNT:
+                break
+            try:
+                listing = next(source_iters[src])
                 top_picks.append(listing)
-            if len(top_picks) >= 8:
+                picked_ids.add(listing["id"])
+            except StopIteration:
+                del source_iters[src]
+
+    # If still under SEND_COUNT, fill with remaining by score
+    if len(top_picks) < SEND_COUNT:
+        for listing in qualified:
+            if listing["id"] not in picked_ids:
+                top_picks.append(listing)
+            if len(top_picks) >= SEND_COUNT:
                 break
 
     print(f"Qualified after scoring: {len(qualified)} (skipped {no_images_count} with <{MIN_IMAGES} images)")
