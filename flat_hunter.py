@@ -1474,11 +1474,15 @@ def search_squareyards(area_name, bhk="3bhk"):
 
     for url in urls_to_try:
         try:
-            resp = session.get(url, timeout=20, headers={
-                **BROWSER_HEADERS,
-                "Referer": "https://www.squareyards.com/",
-                "Sec-Fetch-Site": "same-origin",
-            })
+            # IMPORTANT: Exclude Brotli (br) from Accept-Encoding.
+            # Python requests can't decompress Brotli without the brotli package.
+            # Without this, SquareYards returns br-compressed binary that gets
+            # treated as garbled text → 0 parsed elements.
+            sy_headers = {**BROWSER_HEADERS}
+            sy_headers["Accept-Encoding"] = "gzip, deflate"
+            sy_headers["Referer"] = "https://www.squareyards.com/"
+            sy_headers["Sec-Fetch-Site"] = "same-origin"
+            resp = session.get(url, timeout=20, headers=sy_headers)
             print(f"  [SquareYards] {url.split('/')[-1][:50]} → HTTP {resp.status_code}, size={len(resp.text)}")
             if resp.status_code != 200 or len(resp.text) < 5000:
                 continue
