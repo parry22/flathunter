@@ -248,12 +248,16 @@ def _find_property_list(data, depth=0):
         return None
     if isinstance(data, list) and len(data) > 0:
         if isinstance(data[0], dict) and any(
-            k in data[0] for k in ["propertyId", "id", "rent", "price", "type"]
+            k in data[0] for k in ["propertyId", "id", "rent", "price", "type",
+                                    "listingId", "expectedRent", "listingPrice",
+                                    "coverImage", "builtUpArea", "carpetArea"]
         ):
             return data
     if isinstance(data, dict):
         for key in ["cardData", "data", "results", "properties", "listings",
-                     "searchResults", "propertyList", "list"]:
+                     "searchResults", "propertyList", "list", "catalog",
+                     "rentProperties", "rentalProperties", "hits", "items",
+                     "propertyData", "cards", "entities"]:
             if key in data:
                 result = _find_property_list(data[key], depth + 1)
                 if result:
@@ -279,8 +283,10 @@ def _extract_all_images_from_html(soup_or_tag, source=""):
         "NoBroker": ["assets.nobroker.in", "images.nobroker.in", "cdn.nobroker.in", "nobroker.in/nb-new"],
         "MagicBricks": ["img.staticmb.com", "mediacdn.99acres.com", "magicbricks.com"],
         "99acres": ["mediacdn.99acres.com", "99acres.com"],
-        "Housing.com": ["housing.com", "hc-img.housing.com", "is1-2.housingcdn.com",
-                         "is1-3.housingcdn.com", "is2-2.housingcdn.com", "is2-3.housingcdn.com"],
+        "Housing.com": ["housing.com", "housingcdn.com", "hc-img.housing.com",
+                         "is1-2.housingcdn.com", "is1-3.housingcdn.com",
+                         "is2-2.housingcdn.com", "is2-3.housingcdn.com",
+                         "is3-2.housingcdn.com", "is3-3.housingcdn.com"],
         "SquareYards": ["img.squareyards.com", "squareyards.com"],
     }
 
@@ -307,7 +313,11 @@ def _extract_all_images_from_html(soup_or_tag, source=""):
                 continue
             # If we know CDN domains, prefer those; otherwise accept any
             if allowed:
-                if any(d in src for d in allowed) or not allowed:
+                if any(d in src for d in allowed):
+                    seen.add(src)
+                    images.append(src)
+                # Also accept images > 200px dimensions (likely property photos)
+                elif not allowed:
                     seen.add(src)
                     images.append(src)
             else:
@@ -338,7 +348,12 @@ def _enrich_images_from_url(listing, timeout=10):
     source = listing.get("source", "")
 
     try:
-        resp = session.get(url, timeout=timeout, headers=BROWSER_HEADERS)
+        # Use curl_cffi for Housing.com (Akamai bot detection)
+        if source == "Housing.com" and HAS_CURL_CFFI:
+            resp = curl_requests.get(url, timeout=timeout, impersonate="chrome124",
+                                      headers={"Accept-Language": "en-US,en;q=0.9"})
+        else:
+            resp = session.get(url, timeout=timeout, headers=BROWSER_HEADERS)
         if resp.status_code != 200:
             return existing
 
@@ -359,13 +374,12 @@ def _enrich_images_from_url(listing, timeout=10):
             if len(existing) >= 6:
                 break
 
-        # 3. For NoBroker: also check __NEXT_DATA__ for photo URLs
-        if source == "NoBroker":
+        # 3. Source-specific: scan full HTML for CDN image URLs
+        if source == "NoBroker" and len(existing) < 6:
             next_tag = soup.find("script", id="__NEXT_DATA__")
             if next_tag and next_tag.string:
                 try:
                     nd = json.loads(next_tag.string)
-                    # Find image URLs in the JSON
                     nd_str = json.dumps(nd)
                     cdn_urls = re.findall(r'(https?://assets\.nobroker\.in/img/[^"\\]+)', nd_str)
                     for u in cdn_urls:
@@ -375,6 +389,22 @@ def _enrich_images_from_url(listing, timeout=10):
                             break
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+        if source == "Housing.com" and len(existing) < 6:
+            # Scan full page text for Housing.com CDN image URLs
+            page_text = resp.text
+            housing_cdn_urls = re.findall(
+                r'(https?://(?:is\d+-\d+\.housingcdn\.com|hc-img\.housing\.com|'
+                r'housing\.com/[^\s"\']+\.(?:jpg|jpeg|png|webp))[^\s"\']*)',
+                page_text, re.I
+            )
+            for u in housing_cdn_urls:
+                if u not in existing:
+                    skip = ["logo", "icon", "avatar", "placeholder", "watermark", "map"]
+                    if not any(kw in u.lower() for kw in skip):
+                        existing.append(u)
+                if len(existing) >= 6:
+                    break
 
     except Exception as e:
         print(f"    [enrich] Error fetching {url[:60]}: {e}")
@@ -1069,10 +1099,40 @@ def search_housing(area_name, bhk="3bhk"):
                 try:
                     nd = json.loads(next_tag.string)
                     page_props = nd.get("props", {}).get("pageProps", {})
-                    print(f"  [Housing.com] __NEXT_DATA__ pageProps keys: {list(page_props.keys())[:10]}")
-                    cards = _find_property_list(page_props)
+                    pp_keys = list(page_props.keys())[:15]
+                    print(f"  [Housing.com] __NEXT_DATA__ pageProps keys: {pp_keys}")
+
+                    # Try multiple known paths for Housing.com listing data
+                    cards = None
+                    for path_desc, path_fn in [
+                        ("pageProps direct", lambda: _find_property_list(page_props)),
+                        ("initialState.catalog", lambda: _find_property_list(
+                            page_props.get("initialState", {}).get("catalog", {}))),
+                        ("initialState", lambda: _find_property_list(
+                            page_props.get("initialState", {}))),
+                        ("apolloState", lambda: None),  # Apollo needs special handling
+                    ]:
+                        cards = path_fn()
+                        if cards:
+                            print(f"  [Housing.com] Found {len(cards)} via {path_desc}")
+                            break
+
+                    # Try Apollo state (flattened entity store)
+                    if not cards:
+                        apollo = page_props.get("apolloState", nd.get("props", {}).get("apolloState", {}))
+                        if apollo and isinstance(apollo, dict):
+                            property_items = [
+                                v for k, v in apollo.items()
+                                if isinstance(v, dict) and (
+                                    v.get("__typename") in ("Property", "Listing", "RentProperty") or
+                                    "price" in v or "rent" in v
+                                )
+                            ]
+                            if property_items:
+                                cards = property_items
+                                print(f"  [Housing.com] Found {len(cards)} in apolloState")
+
                     if cards:
-                        print(f"  [Housing.com] Found {len(cards)} properties in __NEXT_DATA__")
                         for prop in cards:
                             listing = _parse_housing_property(prop, area_name, bhk)
                             if listing:
@@ -1080,8 +1140,20 @@ def search_housing(area_name, bhk="3bhk"):
                         if listings:
                             print(f"  [Housing.com] Parsed {len(listings)} from __NEXT_DATA__")
                             return listings[:15]
+                    else:
+                        # Log what we found to help debug
+                        all_keys = list(nd.get("props", {}).keys())[:10]
+                        print(f"  [Housing.com] __NEXT_DATA__ no listings found. Top keys: {all_keys}")
+                        if page_props:
+                            for k in pp_keys[:5]:
+                                v = page_props[k]
+                                vtype = type(v).__name__
+                                vlen = len(v) if isinstance(v, (dict, list, str)) else "N/A"
+                                print(f"    pageProps[{k}] = {vtype}(len={vlen})")
                 except (json.JSONDecodeError, TypeError) as e:
                     print(f"  [Housing.com] __NEXT_DATA__ error: {e}")
+            else:
+                print(f"  [Housing.com] No __NEXT_DATA__ tag found, trying other methods...")
 
             # Try initialState
             init_script = soup.find("script", id="initialState")
@@ -1124,7 +1196,14 @@ def search_housing(area_name, bhk="3bhk"):
                     except (json.JSONDecodeError, TypeError):
                         pass
 
-            # Fallback: parse links
+            # Fallback A: Parse Housing.com listing cards from HTML
+            # Housing.com renders listing cards server-side with class patterns
+            if not listings:
+                listings = _parse_housing_html_cards(soup, area_name, bhk)
+                if listings:
+                    print(f"  [Housing.com] Parsed {len(listings)} from HTML cards")
+
+            # Fallback B: parse links (last resort)
             if not listings:
                 for link in soup.find_all("a", href=True):
                     href = link["href"]
@@ -1149,6 +1228,165 @@ def search_housing(area_name, bhk="3bhk"):
             traceback.print_exc()
 
     print(f"  [Housing.com] Found {len(listings)} in {area_name}")
+    return listings[:15]
+
+
+def _parse_housing_html_cards(soup, area_name, bhk):
+    """Parse Housing.com listing cards directly from the search page HTML.
+    Housing.com renders property cards with images, prices, and links
+    in the server-side HTML. This extracts them without needing __NEXT_DATA__."""
+    listings = []
+    max_rent = BUDGET.get(bhk, 65000)
+
+    # Housing.com image CDN patterns
+    housing_img_patterns = [
+        "housingcdn.com", "housing.com", "hc-img", "is1-2.", "is1-3.",
+        "is2-2.", "is2-3.", "is3-2.", "is3-3.",
+    ]
+
+    # Find all links to property detail pages
+    property_links = []
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        # Housing.com property URLs: /rent/..../N where N is 8+ digit ID
+        # Also match /in/rent/... and /property/... patterns
+        id_match = re.search(r'/(\d{8,})', href)
+        if id_match and any(kw in href.lower() for kw in ["rent", "property", "flat", "apartment"]):
+            property_links.append((link, id_match.group(1), href))
+
+    # Walk up from each link to find the enclosing card, extract images + data
+    seen_ids = set()
+    for link, prop_id, href in property_links:
+        lid = f"hc_{prop_id}"
+        if lid in seen_ids:
+            continue
+        seen_ids.add(lid)
+
+        full_url = urljoin("https://housing.com", href)
+
+        # Walk up to find the card container (typically 3-6 levels up)
+        card = link
+        for _ in range(8):
+            parent = card.parent
+            if parent and parent.name not in ["body", "html", "[document]"]:
+                card = parent
+                # Stop if card seems large enough to be a listing card
+                card_classes = " ".join(card.get("class", []))
+                if any(kw in card_classes.lower() for kw in ["card", "listing", "property", "result"]):
+                    break
+            else:
+                break
+
+        card_text = card.get_text(" ", strip=True)
+
+        # Extract images from card — check ALL img tags for Housing.com CDN URLs
+        images = []
+        for img in card.find_all("img"):
+            for attr in ["src", "data-src", "data-lazyimg", "data-lazy-src",
+                          "data-original", "data-lazy", "data-img", "data-image",
+                          "data-hi-res-src", "data-hi-res", "content"]:
+                src = img.get(attr, "")
+                if not src or not src.startswith("http"):
+                    continue
+                if src in images:
+                    continue
+                # Accept Housing.com CDN images or any real property image
+                if any(d in src for d in housing_img_patterns):
+                    images.append(src)
+                    break
+                # Also accept images with common image extensions from any CDN
+                if re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
+                    skip = ["logo", "icon", "avatar", "placeholder", "noimage",
+                            "default", "blank", "spinner", "loading", "watermark",
+                            "verified", "badge", "tag", "star", "rating", "map"]
+                    if not any(kw in src.lower() for kw in skip):
+                        images.append(src)
+                        break
+
+        # Also check background-image CSS
+        for tag in card.find_all(style=True):
+            style = tag.get("style", "")
+            bg_match = re.search(r'background-image\s*:\s*url\(["\']?(https?://[^"\')\s]+)', style)
+            if bg_match:
+                src = bg_match.group(1)
+                if src not in images and any(d in src for d in housing_img_patterns):
+                    images.append(src)
+
+        # Extract rent from card text
+        rent = 0
+        for pattern in [
+            r'[\u20b9₹]\s*([\d,]+)',
+            r'(\d[\d,]+)\s*/\s*(?:month|mo)',
+            r'(?:rent|price)\s*[:\s]*[\u20b9₹]?\s*([\d,]+)',
+        ]:
+            m = re.search(pattern, card_text, re.I)
+            if m:
+                rent = int(m.group(1).replace(",", ""))
+                if 3000 <= rent <= max_rent:
+                    break
+                rent = 0
+
+        # Extract sqft
+        sqft = 0
+        sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', card_text, re.I)
+        if sqft_match:
+            sqft = int(sqft_match.group(1).replace(",", ""))
+
+        # Floor
+        floor = 0
+        floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
+        if floor_match:
+            floor = int(floor_match.group(1))
+
+        # Furnishing
+        ct_lower = card_text.lower()
+        furnishing = "Unknown"
+        if "fully furnished" in ct_lower:
+            furnishing = "Fully Furnished"
+        elif "semi" in ct_lower and "furnished" in ct_lower:
+            furnishing = "Semi-Furnished"
+        elif "unfurnished" in ct_lower:
+            furnishing = "Unfurnished"
+
+        # Project name — try extracting from structured elements first
+        project = "Unknown"
+        # Look for heading/title elements in the card
+        for heading in card.find_all(["h2", "h3", "h4", "span", "a"]):
+            heading_classes = " ".join(heading.get("class", []))
+            if any(kw in heading_classes.lower() for kw in ["title", "name", "heading", "project"]):
+                project = heading.get_text(strip=True)
+                if project and len(project) > 3:
+                    break
+        if project == "Unknown":
+            proj_match = re.search(
+                r'(?:\d\s*BHK\s*(?:Apartment|Flat|House|Villa)?\s*(?:in|at)\s+)(.+?)(?:\s+for|\s+in\s+)',
+                card_text, re.I
+            )
+            if proj_match:
+                project = proj_match.group(1).strip()
+
+        # Bachelor
+        bachelor = bool(re.search(r'bachelor|anyone|single\s*men', ct_lower))
+
+        listings.append({
+            "id": lid,
+            "url": full_url,
+            "rent": rent,
+            "sqft": sqft,
+            "floor": floor,
+            "furnishing": furnishing,
+            "bachelor_verified": bachelor,
+            "project": project,
+            "locality": area_name.title(),
+            "images": images[:6],
+            "deposit": 0,
+            "source": "Housing.com",
+            "bhk": bhk,
+            "gated": "gated" in ct_lower,
+            "active": True,
+            "needs_verification": rent == 0,
+        })
+
     return listings[:15]
 
 
@@ -1247,13 +1485,34 @@ def search_squareyards(area_name, bhk="3bhk"):
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # SquareYards uses <article class="listing-card" propertyid="...">
+            # Diagnostic: log what HTML structure we got
+            all_divs_with_class = [
+                (t.name, " ".join(t.get("class", [])))
+                for t in soup.find_all(True, class_=True)
+                if any(kw in " ".join(t.get("class", [])).lower()
+                       for kw in ["listing", "card", "property", "result"])
+            ][:10]
+            if all_divs_with_class:
+                print(f"  [SquareYards] Listing-like classes found: {all_divs_with_class[:5]}")
+            else:
+                # Log a sample of all classes to understand page structure
+                all_classes = set()
+                for t in soup.find_all(True, class_=True):
+                    for c in t.get("class", []):
+                        all_classes.add(c)
+                print(f"  [SquareYards] No listing classes. Sample classes: {sorted(all_classes)[:15]}")
+                # Check for JS-only rendering indicators
+                scripts = soup.find_all("script", src=True)
+                js_srcs = [s.get("src", "")[-40:] for s in scripts[:5]]
+                print(f"  [SquareYards] JS bundles: {js_srcs}")
+
+            # SquareYards uses <article class="listing-card" propertyid="..."> OR <div class="listing-card">
             cards = soup.find_all("article", class_=re.compile(r'listing[-_]?card'))
             if not cards:
-                # Try div fallback
+                # Try div fallback (SquareYards may use div instead of article)
                 cards = soup.find_all("div", class_=re.compile(r'listing[-_]?card'))
             if not cards:
-                print(f"  [SquareYards] No article.listing-card found, trying data attributes...")
+                print(f"  [SquareYards] No listing-card found, trying data attributes...")
                 # Try finding by favorite-btn data attributes
                 fav_btns = soup.find_all(attrs={"data-propertyid": True})
                 for btn in fav_btns:
@@ -1709,8 +1968,31 @@ def run():
     low_image_listings = [l for l in all_verified if len(l.get("images", [])) < MIN_IMAGES]
     print(f"\nImage enrichment: {len(low_image_listings)} listings need more images")
 
+    # Sort by source diversity: round-robin so every platform gets enrichment slots
+    # Group by source, then interleave
+    by_source = {}
+    for l in low_image_listings:
+        src = l["source"]
+        by_source.setdefault(src, []).append(l)
+    source_dist = {s: len(v) for s, v in by_source.items()}
+    print(f"  Enrichment by source: {source_dist}")
+
+    # Round-robin interleave: take 1 from each source in turn
+    interleaved = []
+    source_iters = {s: iter(v) for s, v in by_source.items()}
+    while source_iters:
+        empty_sources = []
+        for src in list(source_iters.keys()):
+            try:
+                interleaved.append(next(source_iters[src]))
+            except StopIteration:
+                empty_sources.append(src)
+        for s in empty_sources:
+            del source_iters[s]
+
+    ENRICH_CAP = 80  # increased from 40 to ensure all sources get slots
     enriched_count = 0
-    for listing in low_image_listings[:40]:  # Cap at 40 to stay within timeout
+    for listing in interleaved[:ENRICH_CAP]:
         old_count = len(listing.get("images", []))
         listing["images"] = _enrich_images_from_url(listing)
         new_count = len(listing.get("images", []))
@@ -1743,7 +2025,25 @@ def run():
         qualified.append(listing)
 
     qualified.sort(key=lambda x: x["score"], reverse=True)
-    top_picks = qualified[:8]
+
+    # Select top picks with source diversity: ensure each source gets representation
+    top_picks = []
+    picks_by_source = {}
+    MAX_PER_SOURCE = 4  # max listings from any single source in top picks
+    for listing in qualified:
+        src = listing["source"]
+        if picks_by_source.get(src, 0) < MAX_PER_SOURCE:
+            top_picks.append(listing)
+            picks_by_source[src] = picks_by_source.get(src, 0) + 1
+        if len(top_picks) >= 8:
+            break
+    # If we don't have 8 yet, fill with remaining by score
+    if len(top_picks) < 8:
+        for listing in qualified:
+            if listing not in top_picks:
+                top_picks.append(listing)
+            if len(top_picks) >= 8:
+                break
 
     print(f"Qualified after scoring: {len(qualified)} (skipped {no_images_count} with <{MIN_IMAGES} images)")
     print(f"Sending top {len(top_picks)} to Telegram")
