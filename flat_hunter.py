@@ -902,19 +902,29 @@ def verify_nobroker(listing):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 99acres
+# 99acres — SSR with anti-bot headers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_99acres(area_name, bhk="3bhk"):
     listings = []
-    bhk_slug = bhk.replace("bhk", "-bhk")
-    url = f"https://www.99acres.com/{bhk_slug}-flats-for-rent-in-{area_name}-hyderabad-ffid"
+    bhk_num = bhk[0]  # "3" or "2"
+    # Correct URL: 3-bhk-flats-for-rent-in-kondapur-hyderabad-ffid
+    url = f"https://www.99acres.com/{bhk_num}-bhk-flats-for-rent-in-{area_name}-hyderabad-ffid"
     print(f"  [99acres] Fetching {bhk} in {area_name}...")
 
     try:
-        resp = session.get(url, timeout=15)
+        resp = session.get(url, timeout=20, headers={
+            **HEADERS,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.99acres.com/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Cache-Control": "max-age=0",
+        })
+        print(f"  [99acres] HTTP {resp.status_code}, size={len(resp.text)}")
         if resp.status_code != 200:
-            print(f"  [99acres] HTTP {resp.status_code}")
             return listings
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -924,261 +934,475 @@ def search_99acres(area_name, bhk="3bhk"):
         if next_tag and next_tag.string:
             try:
                 nd = json.loads(next_tag.string)
-                # 99acres structure varies; try common paths
                 page_props = nd.get("props", {}).get("pageProps", {})
-                cards = (
-                    page_props.get("searchData", {}).get("results", [])
-                    or page_props.get("listings", [])
-                    or page_props.get("data", [])
-                )
-                for prop in cards:
-                    if not isinstance(prop, dict):
-                        continue
-                    prop_id = str(prop.get("id", prop.get("propertyId", "")))
-                    if not prop_id:
-                        continue
-
-                    rent = safe_int(prop.get("rent", prop.get("price", 0)))
-                    max_rent = BUDGET.get(bhk, 65000)
-                    if rent > max_rent or rent < 3000:
-                        continue
-
-                    prop_url = prop.get("url", prop.get("propertyUrl", ""))
-                    if prop_url and not prop_url.startswith("http"):
-                        prop_url = urljoin("https://www.99acres.com", prop_url)
-
-                    images = []
-                    for img in prop.get("images", prop.get("photos", []))[:5]:
-                        if isinstance(img, dict):
-                            images.append(img.get("url", img.get("src", "")))
-                        elif isinstance(img, str):
-                            images.append(img)
-                    images = [i for i in images if i.startswith("http")]
-
-                    listings.append({
-                        "id": f"99a_{prop_id}",
-                        "url": prop_url or url,
-                        "rent": rent,
-                        "sqft": safe_int(prop.get("area", prop.get("builtupArea", 0))),
-                        "floor": safe_int(prop.get("floor", 0)),
-                        "furnishing": str(prop.get("furnishing", "Unknown")),
-                        "bachelor_verified": False,
-                        "project": str(prop.get("society", prop.get("projectName", "Unknown"))),
-                        "locality": area_name.title(),
-                        "images": images,
-                        "deposit": safe_int(prop.get("securityDeposit", 0)),
-                        "source": "99acres",
-                        "bhk": bhk,
-                        "gated": False,
-                        "active": True,
-                        "needs_verification": False,
-                    })
-
-                if listings:
+                cards = _find_property_list(page_props)
+                if cards:
+                    for prop in cards:
+                        listing = _parse_generic_property(prop, area_name, bhk, "99acres",
+                                                          "https://www.99acres.com")
+                        if listing:
+                            listings.append(listing)
                     print(f"  [99acres] Parsed {len(listings)} from __NEXT_DATA__")
-                    return listings[:10]
+                    if listings:
+                        return listings[:15]
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                print(f"  [99acres] __NEXT_DATA__ error: {e}")
 
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
-
-        # Fallback: extract links
+        # Fallback: parse listing cards from HTML
+        # 99acres uses cards with rent, locality, images in the HTML
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            match = re.search(r'/(\d{8,})', href)
-            if match and "rent" in href.lower():
-                full_url = urljoin("https://www.99acres.com", href)
-                lid = f"99a_{match.group(1)}"
-                if not any(l["id"] == lid for l in listings):
-                    listings.append({
-                        "id": lid,
-                        "url": full_url,
-                        "source": "99acres",
-                        "bhk": bhk,
-                        "locality": area_name.title(),
-                        "needs_verification": True,
-                        "project": "Unknown",
-                        "rent": 0, "sqft": 0, "floor": 0,
-                        "furnishing": "Unknown",
-                        "bachelor_verified": False,
-                        "images": [], "deposit": 0,
-                        "gated": False, "active": True,
-                    })
+            if not re.search(r'/(\d{6,})', href):
+                continue
+            if "rent" not in href.lower() and "property" not in href.lower():
+                continue
+            id_match = re.search(r'/(\d{6,})', href)
+            if not id_match:
+                continue
+            full_url = urljoin("https://www.99acres.com", href)
+            lid = f"99a_{id_match.group(1)}"
+            if any(l["id"] == lid for l in listings):
+                continue
+
+            card_data = _extract_generic_card(link, bhk, area_name, "99acres")
+            listings.append({
+                "id": lid, "url": full_url, "source": "99acres",
+                "bhk": bhk, "locality": area_name.title(),
+                "needs_verification": card_data.get("rent", 0) == 0,
+                **card_data,
+            })
 
     except Exception as e:
         print(f"  [99acres] Error: {e}")
 
     print(f"  [99acres] Found {len(listings)} in {area_name}")
-    return listings[:10]
+    return listings[:15]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MagicBricks
+# MagicBricks — correct URL suffix is pppfr
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_magicbricks(area_name, bhk="3bhk"):
     listings = []
-    bhk_slug = bhk.replace("bhk", "-bhk")
-    url = f"https://www.magicbricks.com/{bhk_slug}-flats-for-rent-in-{area_name}-hyderabad-pppfs"
+    bhk_num = bhk[0]
+    # Try multiple URL formats
+    urls_to_try = [
+        f"https://www.magicbricks.com/{bhk_num}-bhk-flats-for-rent-in-{area_name.title()}-Hyderabad-pppfr",
+        f"https://www.magicbricks.com/flats-for-rent-in-{area_name.title()}-Hyderabad-pppfr",
+        (f"https://www.magicbricks.com/property-for-rent/residential-real-estate"
+         f"?bedroom={bhk_num}&proptype=Multistorey-Apartment,Builder-Floor-Apartment"
+         f"&cityName=Hyderabad&Locality={area_name.title()}"
+         f"&BudgetMin=0&BudgetMax={BUDGET.get(bhk, 65000)}"),
+    ]
     print(f"  [MagicBricks] Fetching {bhk} in {area_name}...")
 
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code != 200:
-            print(f"  [MagicBricks] HTTP {resp.status_code}")
-            return listings
+    for url in urls_to_try:
+        try:
+            resp = session.get(url, timeout=20, headers={
+                **HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://www.magicbricks.com/",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+            })
+            url_short = url.split("?")[0].split("/")[-1][:40]
+            print(f"  [MagicBricks] {url_short} → HTTP {resp.status_code}, size={len(resp.text)}")
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+            if resp.status_code != 200 or len(resp.text) < 5000:
+                continue
 
-        # Try JSON-LD
-        for script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(script.string)
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and item.get("url"):
-                            lid = f"mb_{hash(item['url']) % 10**10}"
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Try JSON-LD (structured data)
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string)
+                    items = data if isinstance(data, list) else [data]
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        # Schema.org RealEstateListing or similar
+                        if item.get("@type") in ["RealEstateListing", "Product", "Offer"]:
+                            prop_url = item.get("url", "")
+                            if not prop_url:
+                                continue
+                            lid = f"mb_{hash(prop_url) % 10**10}"
                             listings.append({
-                                "id": lid,
-                                "url": item["url"],
-                                "source": "MagicBricks",
-                                "bhk": bhk,
-                                "locality": area_name.title(),
+                                "id": lid, "url": prop_url, "source": "MagicBricks",
+                                "bhk": bhk, "locality": area_name.title(),
                                 "needs_verification": True,
                                 "project": item.get("name", "Unknown"),
                                 "rent": 0, "sqft": 0, "floor": 0,
-                                "furnishing": "Unknown",
-                                "bachelor_verified": False,
+                                "furnishing": "Unknown", "bachelor_verified": False,
                                 "images": [], "deposit": 0,
                                 "gated": False, "active": True,
                             })
-            except (json.JSONDecodeError, TypeError):
-                pass
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-        # Extract links
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            if "propertyDetails" in href or re.search(r'/\d{10,}', href):
-                id_match = re.search(r'(\d{10,})', href)
-                if id_match:
-                    full_url = urljoin("https://www.magicbricks.com", href)
-                    lid = f"mb_{id_match.group(1)}"
-                    if not any(l["id"] == lid for l in listings):
-                        listings.append({
-                            "id": lid,
-                            "url": full_url,
-                            "source": "MagicBricks",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "needs_verification": True,
-                            "project": "Unknown",
-                            "rent": 0, "sqft": 0, "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [], "deposit": 0,
-                            "gated": False, "active": True,
-                        })
+            # Parse listing cards from HTML
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if not re.search(r'(\d{8,})', href):
+                    continue
+                if "property" not in href.lower() and "rent" not in href.lower():
+                    continue
+                id_match = re.search(r'(\d{8,})', href)
+                if not id_match:
+                    continue
+                full_url = urljoin("https://www.magicbricks.com", href)
+                lid = f"mb_{id_match.group(1)}"
+                if any(l["id"] == lid for l in listings):
+                    continue
 
-    except Exception as e:
-        print(f"  [MagicBricks] Error: {e}")
+                card_data = _extract_generic_card(link, bhk, area_name, "MagicBricks")
+                listings.append({
+                    "id": lid, "url": full_url, "source": "MagicBricks",
+                    "bhk": bhk, "locality": area_name.title(),
+                    "needs_verification": card_data.get("rent", 0) == 0,
+                    **card_data,
+                })
+
+            if listings:
+                break  # found results with this URL format
+
+        except Exception as e:
+            print(f"  [MagicBricks] Error: {e}")
 
     print(f"  [MagicBricks] Found {len(listings)} in {area_name}")
-    return listings[:10]
+    return listings[:15]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Housing.com
+# Housing.com — uses initialState JSON embed + correct URL
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_housing(area_name, bhk="3bhk"):
     listings = []
-    bhk_slug = bhk.replace("bhk", "-bhk")
-    url = f"https://housing.com/rent/{bhk_slug}-in-{area_name}-hyderabad"
+    bhk_num = bhk[0]
+    # Try multiple URL formats
+    urls_to_try = [
+        f"https://housing.com/in/rent/{bhk_num}-bhk-flats-for-rent-in-{area_name}-hyderabad",
+        f"https://housing.com/in/rent/real-estate-{area_name}-hyderabad",
+        f"https://housing.com/in/rent/{area_name}-hyderabad",
+    ]
     print(f"  [Housing.com] Fetching {bhk} in {area_name}...")
 
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code != 200:
-            print(f"  [Housing.com] HTTP {resp.status_code}")
-            return listings
+    for url in urls_to_try:
+        try:
+            resp = session.get(url, timeout=20, headers={
+                **HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://housing.com/",
+            }, cookies={
+                "service": "rent",
+                "category": "residential",
+                "cityUrl": "hyderabad",
+            })
+            url_short = url.split("/")[-1][:50]
+            print(f"  [Housing.com] {url_short} → HTTP {resp.status_code}, size={len(resp.text)}")
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+            if resp.status_code != 200 or len(resp.text) < 3000:
+                continue
 
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            if "/rent/" in href and re.search(r'/(\d{8,})', href):
-                id_match = re.search(r'/(\d{8,})', href)
-                if id_match:
-                    full_url = urljoin("https://housing.com", href)
-                    lid = f"hc_{id_match.group(1)}"
-                    if not any(l["id"] == lid for l in listings):
-                        listings.append({
-                            "id": lid,
-                            "url": full_url,
-                            "source": "Housing.com",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "needs_verification": True,
-                            "project": "Unknown",
-                            "rent": 0, "sqft": 0, "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [], "deposit": 0,
-                            "gated": False, "active": True,
-                        })
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-    except Exception as e:
-        print(f"  [Housing.com] Error: {e}")
+            # Housing.com embeds data in <script id="initialState">
+            init_script = soup.find("script", id="initialState")
+            if init_script and init_script.string:
+                try:
+                    init_data = json.loads(init_script.string)
+                    # Search for property list in the JSON
+                    cards = _find_property_list(init_data)
+                    if cards:
+                        for prop in cards:
+                            listing = _parse_generic_property(
+                                prop, area_name, bhk, "Housing.com",
+                                "https://housing.com"
+                            )
+                            if listing:
+                                listings.append(listing)
+                        print(f"  [Housing.com] Parsed {len(listings)} from initialState")
+                        if listings:
+                            return listings[:15]
+                except (json.JSONDecodeError, TypeError) as e:
+                    print(f"  [Housing.com] initialState parse error: {e}")
+
+            # Try __NEXT_DATA__
+            next_tag = soup.find("script", id="__NEXT_DATA__")
+            if next_tag and next_tag.string:
+                try:
+                    nd = json.loads(next_tag.string)
+                    cards = _find_property_list(nd.get("props", {}).get("pageProps", {}))
+                    if cards:
+                        for prop in cards:
+                            listing = _parse_generic_property(
+                                prop, area_name, bhk, "Housing.com",
+                                "https://housing.com"
+                            )
+                            if listing:
+                                listings.append(listing)
+                        if listings:
+                            print(f"  [Housing.com] Parsed {len(listings)} from __NEXT_DATA__")
+                            return listings[:15]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Fallback: parse links
+            for link in soup.find_all("a", href=True):
+                href = link["href"]
+                if re.search(r'/(\d{8,})', href) and "rent" in href.lower():
+                    id_match = re.search(r'/(\d{8,})', href)
+                    if id_match:
+                        full_url = urljoin("https://housing.com", href)
+                        lid = f"hc_{id_match.group(1)}"
+                        if not any(l["id"] == lid for l in listings):
+                            card_data = _extract_generic_card(link, bhk, area_name, "Housing.com")
+                            listings.append({
+                                "id": lid, "url": full_url, "source": "Housing.com",
+                                "bhk": bhk, "locality": area_name.title(),
+                                "needs_verification": card_data.get("rent", 0) == 0,
+                                **card_data,
+                            })
+
+            if listings:
+                break
+
+        except Exception as e:
+            print(f"  [Housing.com] Error: {e}")
 
     print(f"  [Housing.com] Found {len(listings)} in {area_name}")
-    return listings[:10]
+    return listings[:15]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SquareYards
+# SquareYards — SSR HTML, lowest anti-bot, parse card data directly
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_squareyards(area_name, bhk="3bhk"):
     listings = []
-    bhk_slug = bhk.replace("bhk", "-bhk")
-    url = f"https://www.squareyards.com/rent/{bhk_slug}-for-rent-in-{area_name}-hyderabad"
+    bhk_num = bhk[0]
+    url = f"https://www.squareyards.com/rent/{bhk_num}-bhk-for-rent-in-{area_name}-hyderabad"
     print(f"  [SquareYards] Fetching {bhk} in {area_name}...")
 
     try:
-        resp = session.get(url, timeout=15)
+        resp = session.get(url, timeout=20, headers={
+            **HEADERS,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.squareyards.com/",
+        })
+        print(f"  [SquareYards] HTTP {resp.status_code}, size={len(resp.text)}")
         if resp.status_code != 200:
-            print(f"  [SquareYards] HTTP {resp.status_code}")
             return listings
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        # SquareYards is SSR — parse listing data directly from HTML
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            if "rental-" in href and re.search(r'/(\d{6,})', href):
-                id_match = re.search(r'/(\d{6,})', href)
-                if id_match:
-                    full_url = urljoin("https://www.squareyards.com", href)
-                    lid = f"sy_{id_match.group(1)}"
-                    if not any(l["id"] == lid for l in listings):
-                        listings.append({
-                            "id": lid,
-                            "url": full_url,
-                            "source": "SquareYards",
-                            "bhk": bhk,
-                            "locality": area_name.title(),
-                            "needs_verification": True,
-                            "project": "Unknown",
-                            "rent": 0, "sqft": 0, "floor": 0,
-                            "furnishing": "Unknown",
-                            "bachelor_verified": False,
-                            "images": [], "deposit": 0,
-                            "gated": False, "active": True,
-                        })
+            if "rental-" not in href:
+                continue
+            id_match = re.search(r'/(\d{6,})', href)
+            if not id_match:
+                continue
+
+            full_url = urljoin("https://www.squareyards.com", href)
+            lid = f"sy_{id_match.group(1)}"
+            if any(l["id"] == lid for l in listings):
+                continue
+
+            # Parse card data from surrounding HTML
+            card_data = _extract_generic_card(link, bhk, area_name, "SquareYards")
+
+            # SquareYards-specific: extract images from card
+            card = link
+            for _ in range(6):
+                if card.parent and card.parent.name not in ["body", "html", "[document]"]:
+                    card = card.parent
+                else:
+                    break
+            images = []
+            for img in card.find_all("img"):
+                src = img.get("src", "") or img.get("data-src", "")
+                if src and src.startswith("http") and "img.squareyards.com" in src:
+                    clean = src.split("?")[0]
+                    if clean not in images:
+                        images.append(clean)
+            card_data["images"] = images[:5]
+
+            listings.append({
+                "id": lid, "url": full_url, "source": "SquareYards",
+                "bhk": bhk, "locality": area_name.title(),
+                "needs_verification": card_data.get("rent", 0) == 0,
+                **card_data,
+            })
 
     except Exception as e:
         print(f"  [SquareYards] Error: {e}")
 
     print(f"  [SquareYards] Found {len(listings)} in {area_name}")
-    return listings[:10]
+    return listings[:15]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Generic helpers for multi-platform parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _parse_generic_property(prop, area_name, bhk, source, base_url):
+    """Parse a property dict from JSON (__NEXT_DATA__, initialState, etc.)."""
+    if not isinstance(prop, dict):
+        return None
+
+    prop_id = str(prop.get("id", prop.get("propertyId", prop.get("listingId", ""))))
+    if not prop_id:
+        return None
+
+    rent = safe_int(prop.get("rent", prop.get("price", prop.get("expectedPrice", 0))))
+    max_rent = BUDGET.get(bhk, 65000)
+    if rent > max_rent or rent < 3000:
+        return None
+
+    prop_url = prop.get("url", prop.get("propertyUrl", prop.get("detailUrl", "")))
+    if prop_url and not prop_url.startswith("http"):
+        prop_url = urljoin(base_url, prop_url)
+
+    images = []
+    for key in ["images", "photos", "imageList", "galleryImages"]:
+        img_list = prop.get(key, [])
+        if isinstance(img_list, list):
+            for img in img_list[:6]:
+                if isinstance(img, str) and img.startswith("http"):
+                    images.append(img)
+                elif isinstance(img, dict):
+                    u = img.get("url", img.get("src", img.get("originalUrl", "")))
+                    if u and u.startswith("http"):
+                        images.append(u)
+            if images:
+                break
+    # og / thumbnail fallback
+    for key in ["thumbnailUrl", "mainImage", "coverImage", "photoUrl"]:
+        u = prop.get(key, "")
+        if isinstance(u, str) and u.startswith("http") and u not in images:
+            images.insert(0, u)
+
+    project = str(prop.get("society", prop.get("projectName",
+                  prop.get("buildingName", prop.get("title", "Unknown")))))
+
+    return {
+        "id": f"{source[:3].lower()}_{prop_id}",
+        "url": prop_url or "",
+        "rent": rent,
+        "sqft": safe_int(prop.get("area", prop.get("builtupArea",
+                prop.get("carpet_area", prop.get("superArea", 0))))),
+        "floor": safe_int(prop.get("floor", prop.get("floorNo", 0))),
+        "furnishing": str(prop.get("furnishing", prop.get("furnishingType", "Unknown"))),
+        "bachelor_verified": False,
+        "project": project,
+        "locality": area_name.title(),
+        "images": images[:5],
+        "deposit": safe_int(prop.get("securityDeposit", prop.get("deposit", 0))),
+        "source": source,
+        "bhk": bhk,
+        "gated": False,
+        "active": True,
+        "needs_verification": False,
+    }
+
+
+def _extract_generic_card(link_tag, bhk, area_name, source):
+    """Extract listing data from an HTML card surrounding a link. Works across platforms."""
+    data = {
+        "project": "Unknown", "rent": 0, "sqft": 0, "floor": 0,
+        "furnishing": "Unknown", "bachelor_verified": False,
+        "images": [], "deposit": 0, "gated": False, "active": True,
+    }
+
+    card = link_tag
+    for _ in range(6):
+        if card.parent and card.parent.name not in ["body", "html", "[document]"]:
+            card = card.parent
+        else:
+            break
+
+    card_text = card.get_text(" ", strip=True)
+
+    # Rent (multiple patterns)
+    for pattern in [
+        r'[\u20b9]\s*([\d,]+)',
+        r'(\d[\d,]+)\s*(?:\+[^R]*)?\s*(?:No Extra\s+)?(?:Maintenance\s+)?Rent',
+        r'(\d[\d,]+)\s*/\s*(?:month|mo)',
+        r'(?:rent|price)\s*[:\s]*[\u20b9]?\s*([\d,]+)',
+    ]:
+        m = re.search(pattern, card_text, re.I)
+        if m:
+            data["rent"] = int(m.group(1).replace(",", ""))
+            break
+    if data["rent"] == 0:
+        numbers = re.findall(r'(\d[\d,]+)', card_text)
+        for num_str in numbers:
+            num = int(num_str.replace(",", ""))
+            if 5000 <= num <= 100000:
+                data["rent"] = num
+                break
+
+    # Deposit
+    dep_match = re.search(r'([\d,]+)\s*Deposit', card_text, re.I)
+    if dep_match:
+        data["deposit"] = int(dep_match.group(1).replace(",", ""))
+
+    # Sqft
+    for pattern in [r'([\d,]+)\s*sq\.?\s*ft', r'([\d,]+)\s*(?:Builtup|Carpet|Super)']:
+        m = re.search(pattern, card_text, re.I)
+        if m:
+            data["sqft"] = int(m.group(1).replace(",", ""))
+            break
+
+    # Floor
+    floor_match = re.search(r'(\d+)\s*/\s*(\d+)', card_text)
+    if floor_match:
+        data["floor"] = int(floor_match.group(1))
+    if data["floor"] == 0:
+        floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
+        if floor_match:
+            data["floor"] = int(floor_match.group(1))
+
+    # Tenant
+    ct_lower = card_text.lower()
+    if re.search(r'all\s+preferred|bachelor|anyone', ct_lower):
+        data["bachelor_verified"] = True
+    elif re.search(r'family\s+preferred|family\s+only', ct_lower):
+        data["family_only"] = True
+
+    # Furnishing
+    if "fully furnished" in ct_lower:
+        data["furnishing"] = "Fully Furnished"
+    elif "semi" in ct_lower and "furnished" in ct_lower:
+        data["furnishing"] = "Semi-Furnished"
+    elif "unfurnished" in ct_lower:
+        data["furnishing"] = "Unfurnished"
+
+    # Gated
+    if "posh society" in ct_lower or "gated" in ct_lower:
+        data["gated"] = True
+
+    # Project name
+    proj_match = re.search(
+        r'(?:\d\s*BHK\s*(?:Apartment|Flat|Villa|House|Independent)\s*(?:In|in|at)\s+)(.+?)(?:\s+for\s+Rent|\s+in\s+)',
+        card_text, re.I
+    )
+    if proj_match:
+        data["project"] = proj_match.group(1).strip()
+
+    # Images
+    for img in card.find_all("img"):
+        src = img.get("src", "") or img.get("data-src", "") or img.get("data-original", "")
+        if src and src.startswith("http"):
+            if re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', src, re.I):
+                if not any(kw in src.lower() for kw in ["logo", "icon", "avatar", "placeholder"]):
+                    data["images"].append(src)
+
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1357,7 +1581,9 @@ def run():
     print(f"\nTotal verified: {len(all_verified)}")
 
     # ── Step 5: Budget & basic filters ──
+    MIN_IMAGES = 3  # minimum images required to share a listing
     qualified = []
+    no_images_count = 0
     for listing in all_verified:
         rent = listing.get("rent", 0)
         bhk = listing.get("bhk", "3bhk")
@@ -1367,6 +1593,13 @@ def run():
             state["rejected"].append({"id": listing["id"], "reason": "budget"})
             continue
 
+        # Require minimum images for sharing
+        img_count = len(listing.get("images", []))
+        if img_count < MIN_IMAGES:
+            no_images_count += 1
+            state["rejected"].append({"id": listing["id"], "reason": f"only {img_count} images (need {MIN_IMAGES})"})
+            continue
+
         listing["score"] = score_listing(listing)
         qualified.append(listing)
 
@@ -1374,7 +1607,7 @@ def run():
     qualified.sort(key=lambda x: x["score"], reverse=True)
     top_picks = qualified[:8]
 
-    print(f"Qualified after scoring: {len(qualified)}")
+    print(f"Qualified after scoring: {len(qualified)} (skipped {no_images_count} with <{MIN_IMAGES} images)")
     print(f"Sending top {len(top_picks)} to Telegram")
 
     # ── Step 6: Send to Telegram ──
