@@ -1018,11 +1018,27 @@ def search_housing(area_name, bhk="3bhk"):
         print(f"  [Housing.com] Skipping — curl_cffi not available (needed to bypass bot detection)")
         return listings
 
-    # Housing.com URL formats (rent only, no buy URLs)
+    # Housing.com requires locality IDs in URLs (discovered via sitemap)
+    # Format: /rent/{bhk}bhk-flats-for-rent-in-{area}-hyderabad-C{bhk_code}P{locality_id}
+    # BHK codes: 2BHK=C4, 3BHK=C8
+    HOUSING_LOCALITIES = {
+        "kondapur":   "P5bp8fs9w5gm0jsim",
+        "gachibowli": "Pg7khohd393v9det",
+        "kokapet":    "P66lqyz1e9298u5ou",
+    }
+    BHK_CODES = {"2bhk": "C4", "3bhk": "C8"}
+
+    loc_id = HOUSING_LOCALITIES.get(area_lower, "")
+    bhk_code = BHK_CODES.get(bhk, "C8")
+
+    if not loc_id:
+        print(f"  [Housing.com] No locality ID for {area_name}")
+        return listings
+
+    # Construct correct URL with locality ID
     urls_to_try = [
-        f"https://housing.com/in/rent/{bhk_num}-bhk-house-for-rent-in-{area_lower}-hyderabad",
-        f"https://housing.com/in/rent/property-for-rent-in-{area_lower}-hyderabad",
-        f"https://housing.com/in/rent/real-estate-{area_lower}-hyderabad",
+        f"https://housing.com/rent/{bhk_num}bhk-flats-for-rent-in-{area_lower}-hyderabad-{bhk_code}{loc_id}",
+        f"https://housing.com/rent/flats-for-rent-in-{area_lower}-hyderabad-{loc_id}",
     ]
     print(f"  [Housing.com] Fetching {bhk} in {area_name} (curl_cffi)...")
 
@@ -1206,182 +1222,175 @@ def _parse_housing_property(prop, area_name, bhk):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_squareyards(area_name, bhk="3bhk"):
-    """Search SquareYards — parse card containers directly (links are JS-injected)."""
+    """Search SquareYards — parse <article class='listing-card'> containers with data-* attributes."""
     listings = []
     bhk_num = bhk[0]
     area_lower = area_name.lower()
 
-    # The first URL format works (returns 55KB+ pages with listing cards)
-    url = f"https://www.squareyards.com/rent/{bhk_num}-bhk-for-rent-in-{area_lower}-hyderabad"
+    # The property-for-rent URL returns more results than bhk-specific
+    urls_to_try = [
+        f"https://www.squareyards.com/rent/{bhk_num}-bhk-for-rent-in-{area_lower}-hyderabad",
+        f"https://www.squareyards.com/rent/property-for-rent-in-{area_lower}-hyderabad",
+    ]
     print(f"  [SquareYards] Fetching {bhk} in {area_name}...")
 
-    try:
-        resp = session.get(url, timeout=20, headers={
-            **BROWSER_HEADERS,
-            "Referer": "https://www.squareyards.com/",
-            "Sec-Fetch-Site": "same-origin",
-        })
-        print(f"  [SquareYards] HTTP {resp.status_code}, size={len(resp.text)}")
-        if resp.status_code != 200 or len(resp.text) < 5000:
-            return listings
+    for url in urls_to_try:
+        try:
+            resp = session.get(url, timeout=20, headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.squareyards.com/",
+                "Sec-Fetch-Site": "same-origin",
+            })
+            print(f"  [SquareYards] {url.split('/')[-1][:50]} → HTTP {resp.status_code}, size={len(resp.text)}")
+            if resp.status_code != 200 or len(resp.text) < 5000:
+                continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-        # SquareYards uses listing-card divs. Links are JS-injected but text + images
-        # are in the static HTML. Find card containers by class patterns.
-        card_selectors = [
-            {"class_": re.compile(r'listing[-_]?card', re.I)},
-            {"class_": re.compile(r'property[-_]?card', re.I)},
-            {"class_": re.compile(r'search[-_]?card', re.I)},
-            {"class_": re.compile(r'result[-_]?card', re.I)},
-        ]
+            # SquareYards uses <article class="listing-card" propertyid="...">
+            cards = soup.find_all("article", class_=re.compile(r'listing[-_]?card'))
+            if not cards:
+                # Try div fallback
+                cards = soup.find_all("div", class_=re.compile(r'listing[-_]?card'))
+            if not cards:
+                print(f"  [SquareYards] No article.listing-card found, trying data attributes...")
+                # Try finding by favorite-btn data attributes
+                fav_btns = soup.find_all(attrs={"data-propertyid": True})
+                for btn in fav_btns:
+                    # Walk up to find parent card
+                    parent = btn
+                    for _ in range(4):
+                        if parent.parent and parent.parent.name not in ["body", "html", "[document]"]:
+                            parent = parent.parent
+                        else:
+                            break
+                    if parent not in cards:
+                        cards.append(parent)
 
-        cards = []
-        for selector in card_selectors:
-            cards = soup.find_all("div", **selector)
             if cards:
-                print(f"  [SquareYards] Found {len(cards)} card containers")
+                print(f"  [SquareYards] Found {len(cards)} listing cards")
+
+            for card in cards:
+                # Get property ID from article tag or favorite-btn
+                prop_id = card.get("propertyid", "")
+                if not prop_id:
+                    fav_btn = card.find(attrs={"data-propertyid": True})
+                    if fav_btn:
+                        prop_id = fav_btn.get("data-propertyid", "")
+                if not prop_id:
+                    continue
+
+                lid = f"sy_{prop_id}"
+                if any(l["id"] == lid for l in listings):
+                    continue
+
+                # Extract structured data from favorite-btn data attributes
+                fav_btn = card.find(class_=re.compile(r'favorite|shortlist'))
+                if not fav_btn:
+                    fav_btn = card.find(attrs={"data-price": True})
+
+                rent = 0
+                sqft = 0
+                project = "Unknown"
+                locality = area_name.title()
+
+                if fav_btn:
+                    rent = safe_int(fav_btn.get("data-price", 0))
+                    sqft_str = fav_btn.get("data-area", "")
+                    sqft = safe_int(re.sub(r'[^\d]', '', sqft_str))
+                    project = fav_btn.get("data-projectname", fav_btn.get("data-name", "Unknown"))
+                    locality = fav_btn.get("data-sublocalityname", area_name.title())
+
+                # Fallback: parse rent from text
+                if rent == 0:
+                    price_tag = card.find(class_=re.compile(r'listing[-_]?price'))
+                    if price_tag:
+                        price_text = price_tag.get_text(" ", strip=True)
+                        m = re.search(r'([\d,]+)', price_text)
+                        if m:
+                            rent = int(m.group(1).replace(",", ""))
+
+                # Budget check
+                max_rent = BUDGET.get(bhk, 65000)
+                if rent <= 0 or rent > max_rent:
+                    continue
+
+                # Floor
+                floor = 0
+                card_text = card.get_text(" ", strip=True)
+                floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
+                if floor_match:
+                    floor = int(floor_match.group(1))
+
+                # Furnishing
+                furnishing = "Unknown"
+                ct_lower = card_text.lower()
+                if "fully furnished" in ct_lower or "fully-furnished" in ct_lower:
+                    furnishing = "Fully Furnished"
+                elif "semi" in ct_lower and "furnished" in ct_lower:
+                    furnishing = "Semi-Furnished"
+                elif "unfurnished" in ct_lower:
+                    furnishing = "Unfurnished"
+
+                # Project name from .project-name span
+                if project == "Unknown":
+                    pn_tag = card.find(class_="project-name")
+                    if pn_tag:
+                        project = pn_tag.get_text(strip=True)
+
+                # Detail page URL from .listing-body data-url
+                detail_url = ""
+                body_tag = card.find(class_=re.compile(r'listing[-_]?body'))
+                if body_tag:
+                    detail_url = body_tag.get("data-url", "")
+                if not detail_url:
+                    # Try bxslider item data-href
+                    item_tag = card.find(class_="item")
+                    if item_tag:
+                        detail_url = item_tag.get("data-href", "")
+                if detail_url and not detail_url.startswith("http"):
+                    detail_url = urljoin("https://www.squareyards.com", detail_url)
+                if not detail_url:
+                    detail_url = f"https://www.squareyards.com/rental-{bhk_num}-bhk-apartment/{prop_id}"
+
+                # Images from bxslider
+                images = []
+                for img in card.find_all("img", class_=re.compile(r'img[-_]?responsive')):
+                    for attr in ["src", "data-src", "data-lazy"]:
+                        src = img.get(attr, "")
+                        if src and src.startswith("http") and "squareyards" in src:
+                            if src not in images:
+                                images.append(src)
+                            break
+                # Also check all images
+                if not images:
+                    images = _extract_all_images_from_html(card, "SquareYards")
+
+                listings.append({
+                    "id": lid,
+                    "url": detail_url,
+                    "rent": rent,
+                    "sqft": sqft,
+                    "floor": floor,
+                    "furnishing": furnishing,
+                    "bachelor_verified": False,
+                    "project": project,
+                    "locality": locality,
+                    "images": images[:6],
+                    "deposit": 0,
+                    "source": "SquareYards",
+                    "bhk": bhk,
+                    "gated": False,
+                    "active": True,
+                    "needs_verification": False,
+                })
+
+            if listings:
                 break
 
-        # If no card containers found by class, try finding by image pattern
-        if not cards:
-            # Look for imgs from SquareYards CDN, walk up to find card containers
-            sy_imgs = soup.find_all("img", src=re.compile(r'img\.squareyards\.com|static\.squareyards\.com'))
-            if not sy_imgs:
-                sy_imgs = soup.find_all("img", attrs={"data-src": re.compile(r'squareyards\.com')})
-
-            seen_parents = set()
-            for img in sy_imgs:
-                parent = img
-                for _ in range(5):
-                    if parent.parent and parent.parent.name not in ["body", "html", "[document]"]:
-                        parent = parent.parent
-                    else:
-                        break
-                parent_id = id(parent)
-                if parent_id not in seen_parents:
-                    seen_parents.add(parent_id)
-                    cards.append(parent)
-
-            if cards:
-                print(f"  [SquareYards] Found {len(cards)} cards via image parents")
-
-        # Parse each card
-        card_idx = 0
-        for card in cards:
-            card_text = card.get_text(" ", strip=True)
-            if len(card_text) < 30:
-                continue
-
-            # Extract rent from card text
-            rent = 0
-            for pattern in [
-                r'[\u20b9]\s*([\d,]+)',
-                r'([\d,]+)\s*/\s*(?:month|mo)',
-                r'(?:rent|price)\s*[:\s]*[\u20b9]?\s*([\d,]+)',
-            ]:
-                m = re.search(pattern, card_text, re.I)
-                if m:
-                    rent = int(m.group(1).replace(",", ""))
-                    break
-            if rent == 0:
-                # Try first large number
-                numbers = re.findall(r'(\d[\d,]+)', card_text)
-                for num_str in numbers:
-                    num = int(num_str.replace(",", ""))
-                    if 5000 <= num <= 100000:
-                        rent = num
-                        break
-
-            if rent == 0:
-                continue  # Skip cards without rent
-
-            # Budget check
-            max_rent = BUDGET.get(bhk, 65000)
-            if rent > max_rent:
-                continue
-
-            # Extract sqft
-            sqft = 0
-            sqft_match = re.search(r'([\d,]+)\s*sq\.?\s*ft', card_text, re.I)
-            if sqft_match:
-                sqft = int(sqft_match.group(1).replace(",", ""))
-
-            # Extract floor
-            floor = 0
-            floor_match = re.search(r'(\d+)\s*(?:th|st|nd|rd)\s*(?:floor|of)', card_text, re.I)
-            if floor_match:
-                floor = int(floor_match.group(1))
-
-            # Furnishing
-            furnishing = "Unknown"
-            ct_lower = card_text.lower()
-            if "fully furnished" in ct_lower:
-                furnishing = "Fully Furnished"
-            elif "semi" in ct_lower and "furnished" in ct_lower:
-                furnishing = "Semi-Furnished"
-            elif "unfurnished" in ct_lower:
-                furnishing = "Unfurnished"
-
-            # Extract images from card
-            images = _extract_all_images_from_html(card, "SquareYards")
-
-            # Try to extract property ID from image URLs
-            # Pattern: IN_{numericId}-{code}.jpg
-            prop_id = None
-            for img in card.find_all("img"):
-                for attr in ["src", "data-src", "data-lazy"]:
-                    src = img.get(attr, "")
-                    id_m = re.search(r'IN_(\d{5,})', src)
-                    if id_m:
-                        prop_id = id_m.group(1)
-                        break
-                if prop_id:
-                    break
-
-            # Generate a unique ID
-            card_idx += 1
-            if prop_id:
-                lid = f"sy_{prop_id}"
-                detail_url = f"https://www.squareyards.com/rental-{bhk_num}-bhk-apartment/{prop_id}"
-            else:
-                lid = f"sy_{area_name}_{bhk}_{card_idx}"
-                detail_url = url  # Fallback to search page
-
-            if any(l["id"] == lid for l in listings):
-                continue
-
-            # Project name
-            project = "Unknown"
-            proj_match = re.search(
-                r'(?:\d\s*BHK.*?(?:in|at)\s+)(.+?)(?:\s*,|\s+for|\s+\d)',
-                card_text, re.I
-            )
-            if proj_match:
-                project = proj_match.group(1).strip()[:60]
-
-            listings.append({
-                "id": lid,
-                "url": detail_url,
-                "rent": rent,
-                "sqft": sqft,
-                "floor": floor,
-                "furnishing": furnishing,
-                "bachelor_verified": False,
-                "project": project,
-                "locality": area_name.title(),
-                "images": images[:6],
-                "deposit": 0,
-                "source": "SquareYards",
-                "bhk": bhk,
-                "gated": False,
-                "active": True,
-                "needs_verification": prop_id is None,
-            })
-
-    except Exception as e:
-        print(f"  [SquareYards] Error: {e}")
-        traceback.print_exc()
+        except Exception as e:
+            print(f"  [SquareYards] Error: {e}")
+            traceback.print_exc()
 
     print(f"  [SquareYards] Found {len(listings)} in {area_name}")
     return listings[:15]
