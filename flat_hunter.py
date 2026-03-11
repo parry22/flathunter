@@ -1091,110 +1091,69 @@ def search_housing(area_name, bhk="3bhk"):
             if len(resp.text) < 5000:
                 continue
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Try __NEXT_DATA__ (Housing.com is Next.js)
-            next_tag = soup.find("script", id="__NEXT_DATA__")
-            if next_tag and next_tag.string:
+            # ── PRIMARY: Parse window.__INITIAL_STATE__ = JSON.parse("...") ──
+            # Housing.com uses a double-encoded JSON blob (string inside JSON.parse)
+            # Format: window.__INITIAL_STATE__=JSON.parse("escaped_json_string");
+            # Structure: state.searchResults.listings = [{id, key}...]
+            #            state.searchResults.data = {id: {property_object}, ...}
+            init_match = re.search(
+                r'window\.__INITIAL_STATE__\s*=\s*JSON\.parse\("(.*?)"\)\s*;',
+                resp.text, re.S
+            )
+            if init_match:
                 try:
-                    nd = json.loads(next_tag.string)
-                    page_props = nd.get("props", {}).get("pageProps", {})
-                    pp_keys = list(page_props.keys())[:15]
-                    print(f"  [Housing.com] __NEXT_DATA__ pageProps keys: {pp_keys}")
+                    # Double-decode: first unescape the string, then parse JSON
+                    raw_escaped = init_match.group(1)
+                    unescaped = json.loads('"' + raw_escaped + '"')
+                    state_data = json.loads(unescaped)
 
-                    # Try multiple known paths for Housing.com listing data
-                    cards = None
-                    for path_desc, path_fn in [
-                        ("pageProps direct", lambda: _find_property_list(page_props)),
-                        ("initialState.catalog", lambda: _find_property_list(
-                            page_props.get("initialState", {}).get("catalog", {}))),
-                        ("initialState", lambda: _find_property_list(
-                            page_props.get("initialState", {}))),
-                        ("apolloState", lambda: None),  # Apollo needs special handling
-                    ]:
-                        cards = path_fn()
-                        if cards:
-                            print(f"  [Housing.com] Found {len(cards)} via {path_desc}")
-                            break
+                    sr = state_data.get("searchResults", {})
+                    sr_data = sr.get("data", {})
+                    sr_listings = sr.get("listings", [])
 
-                    # Try Apollo state (flattened entity store)
-                    if not cards:
-                        apollo = page_props.get("apolloState", nd.get("props", {}).get("apolloState", {}))
-                        if apollo and isinstance(apollo, dict):
-                            property_items = [
-                                v for k, v in apollo.items()
-                                if isinstance(v, dict) and (
-                                    v.get("__typename") in ("Property", "Listing", "RentProperty") or
-                                    "price" in v or "rent" in v
-                                )
-                            ]
-                            if property_items:
-                                cards = property_items
-                                print(f"  [Housing.com] Found {len(cards)} in apolloState")
-
-                    if cards:
-                        for prop in cards:
-                            listing = _parse_housing_property(prop, area_name, bhk)
+                    if sr_data and sr_listings:
+                        print(f"  [Housing.com] __INITIAL_STATE__ found {len(sr_listings)} listings, {len(sr_data)} data entries")
+                        for item in sr_listings:
+                            prop_id = str(item.get("id", ""))
+                            prop = sr_data.get(prop_id)
+                            if not prop or not isinstance(prop, dict):
+                                continue
+                            listing = _parse_housing_initial_state(prop, area_name, bhk)
                             if listing:
                                 listings.append(listing)
                         if listings:
-                            print(f"  [Housing.com] Parsed {len(listings)} from __NEXT_DATA__")
+                            print(f"  [Housing.com] Parsed {len(listings)} from __INITIAL_STATE__")
                             return listings[:15]
                     else:
-                        # Log what we found to help debug
-                        all_keys = list(nd.get("props", {}).keys())[:10]
-                        print(f"  [Housing.com] __NEXT_DATA__ no listings found. Top keys: {all_keys}")
-                        if page_props:
-                            for k in pp_keys[:5]:
-                                v = page_props[k]
-                                vtype = type(v).__name__
-                                vlen = len(v) if isinstance(v, (dict, list, str)) else "N/A"
-                                print(f"    pageProps[{k}] = {vtype}(len={vlen})")
-                except (json.JSONDecodeError, TypeError) as e:
-                    print(f"  [Housing.com] __NEXT_DATA__ error: {e}")
+                        top_keys = list(state_data.keys())[:10]
+                        print(f"  [Housing.com] __INITIAL_STATE__ no searchResults. Keys: {top_keys}")
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    print(f"  [Housing.com] __INITIAL_STATE__ parse error: {e}")
             else:
-                print(f"  [Housing.com] No __NEXT_DATA__ tag found, trying other methods...")
-
-            # Try initialState
-            init_script = soup.find("script", id="initialState")
-            if init_script and init_script.string:
-                try:
-                    init_data = json.loads(init_script.string)
-                    cards = _find_property_list(init_data)
-                    if cards:
-                        for prop in cards:
-                            listing = _parse_housing_property(prop, area_name, bhk)
-                            if listing:
-                                listings.append(listing)
-                        if listings:
-                            print(f"  [Housing.com] Parsed {len(listings)} from initialState")
-                            return listings[:15]
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # Try embedded JSON in script tags
-            for script in soup.find_all("script"):
-                text = script.string or ""
-                if len(text) < 500:
-                    continue
-                json_match = re.search(
-                    r'(?:window\.__INITIAL_STATE__|window\.__STORE_DATA__|'
-                    r'window\.initialState)\s*=\s*(\{.+?\});?\s*(?:</script>|$)',
-                    text, re.S
+                # Try fallback: raw JSON assignment (older format)
+                init_match2 = re.search(
+                    r'window\.__INITIAL_STATE__\s*=\s*(\{.+?\})\s*;?\s*(?:</script>|window\.)',
+                    resp.text, re.S
                 )
-                if json_match:
+                if init_match2:
                     try:
-                        jdata = json.loads(json_match.group(1))
-                        cards = _find_property_list(jdata)
-                        if cards:
-                            for prop in cards:
-                                listing = _parse_housing_property(prop, area_name, bhk)
+                        state_data = json.loads(init_match2.group(1))
+                        sr = state_data.get("searchResults", {})
+                        sr_data = sr.get("data", {})
+                        if sr_data:
+                            for prop_id, prop in sr_data.items():
+                                listing = _parse_housing_initial_state(prop, area_name, bhk)
                                 if listing:
                                     listings.append(listing)
                             if listings:
-                                break
+                                print(f"  [Housing.com] Parsed {len(listings)} from __INITIAL_STATE__ (raw)")
+                                return listings[:15]
                     except (json.JSONDecodeError, TypeError):
                         pass
+
+                print(f"  [Housing.com] No __INITIAL_STATE__ found, trying HTML fallback...")
+
+            soup = BeautifulSoup(resp.text, "html.parser")
 
             # Fallback A: Parse Housing.com listing cards from HTML
             # Housing.com renders listing cards server-side with class patterns
@@ -1229,6 +1188,140 @@ def search_housing(area_name, bhk="3bhk"):
 
     print(f"  [Housing.com] Found {len(listings)} in {area_name}")
     return listings[:15]
+
+
+def _parse_housing_initial_state(prop, area_name, bhk):
+    """Parse a Housing.com property from the __INITIAL_STATE__ searchResults.data structure.
+    This is the most reliable parser — extracts images, rent, floor, furnishing directly."""
+    if not isinstance(prop, dict):
+        return None
+
+    prop_id = str(prop.get("listingId", prop.get("originalListingId", prop.get("id", ""))))
+    if not prop_id:
+        return None
+
+    # Skip inactive
+    if not prop.get("isActiveProperty", True):
+        return None
+
+    # Rent / Price
+    rent = safe_int(prop.get("price", 0))
+    if rent == 0:
+        dp = prop.get("displayPrice", {})
+        if isinstance(dp, dict):
+            vals = dp.get("value", [])
+            if isinstance(vals, list) and vals:
+                rent = safe_int(vals[0])
+    max_rent = BUDGET.get(bhk, 65000)
+    if rent > max_rent or rent < 3000:
+        return None
+
+    # Images — Housing.com has rich image data
+    images = []
+    # 1. Cover image
+    cover = prop.get("coverImage", {})
+    if isinstance(cover, dict):
+        cover_src = cover.get("src", "")
+        if cover_src and cover_src.startswith("http"):
+            images.append(cover_src)
+
+    # 2. Gallery images from details.images
+    details = prop.get("details", {})
+    if isinstance(details, dict):
+        img_groups = details.get("images", [])
+        if isinstance(img_groups, list):
+            for group in img_groups:
+                if not isinstance(group, dict):
+                    continue
+                # Prefer "property" type over "locality"
+                group_type = group.get("type", "")
+                group_images = group.get("images", [])
+                if isinstance(group_images, list):
+                    for img_obj in group_images:
+                        if isinstance(img_obj, dict):
+                            src = img_obj.get("src", "")
+                            if src and src.startswith("http") and src not in images:
+                                images.append(src)
+                        elif isinstance(img_obj, str) and img_obj.startswith("http"):
+                            if img_obj not in images:
+                                images.append(img_obj)
+                        if len(images) >= 6:
+                            break
+                if len(images) >= 6:
+                    break
+
+    # URL
+    prop_url = prop.get("url", "")
+    if prop_url and not prop_url.startswith("http"):
+        prop_url = "https://housing.com" + prop_url
+
+    # Floor and furnishing from featureAndConfig array
+    floor = 0
+    furnishing = "Unknown"
+    features = prop.get("featureAndConfig", [])
+    if isinstance(features, list):
+        for f in features:
+            if not isinstance(f, dict):
+                continue
+            label = f.get("label", "")
+            desc = f.get("description", "")
+            if label == "Floor number" and desc:
+                floor_match = re.match(r'(\d+)', desc)
+                if floor_match:
+                    floor = int(floor_match.group(1))
+            elif label == "Furnishing" and desc:
+                furnishing = desc  # "Unfurnished", "Semi Furnished", "Fully Furnished"
+
+    # If floor not in features, try top-level
+    if floor == 0:
+        floor = safe_int(prop.get("floor", prop.get("floorNo", 0)))
+
+    # Sqft
+    sqft = 0
+    built_up = prop.get("builtUpArea", {})
+    if isinstance(built_up, dict):
+        sqft = safe_int(built_up.get("value", 0))
+    if sqft == 0:
+        sqft = safe_int(prop.get("carpetArea", prop.get("superArea", 0)))
+
+    # Project / society name
+    project = str(prop.get("title", "Unknown"))
+    address = prop.get("address", {})
+    if isinstance(address, dict):
+        addr_str = address.get("address", "")
+        if addr_str and project == "Unknown":
+            project = addr_str
+
+    # Deposit
+    deposit = 0
+    dp = prop.get("displayPrice", {})
+    if isinstance(dp, dict):
+        deposit = safe_int(dp.get("deposit", 0))
+
+    # Bachelor — check tenant preference if available
+    bachelor = False
+    tenant_pref = str(prop.get("tenantPreference", "")).lower()
+    if any(kw in tenant_pref for kw in ["bachelor", "anyone", "all"]):
+        bachelor = True
+
+    return {
+        "id": f"hc_{prop_id}",
+        "url": prop_url or f"https://housing.com/rent/property/{prop_id}",
+        "rent": rent,
+        "sqft": sqft,
+        "floor": floor,
+        "furnishing": furnishing,
+        "bachelor_verified": bachelor,
+        "project": project,
+        "locality": area_name.title(),
+        "images": images[:6],
+        "deposit": deposit,
+        "source": "Housing.com",
+        "bhk": bhk,
+        "gated": False,
+        "active": True,
+        "needs_verification": False,
+    }
 
 
 def _parse_housing_html_cards(soup, area_name, bhk):
